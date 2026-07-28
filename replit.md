@@ -1,45 +1,68 @@
-# [Project name]
+# Quiz Bot Manager
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A Telegram bot system that lets users create and manage their own quiz bots (subbots). The main bot acts as a hub; subbots run as independent Telegram bots distributing quizzes to groups with leaderboards.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `cd telegram_bot && python3 main.py` — start the main bot + all active subbots
+- Set `ADMIN_ID` environment variable to your Telegram user ID (send `/myid` to the bot to find it)
+- Set `MAIN_BOT_TOKEN` env var for production (already configured for dev)
+- Set `DB_PATH` to `/data/quiz_bot.db` on Render (use a persistent disk)
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.11
+- python-telegram-bot v20.7 (async, with APScheduler job-queue)
+- SQLite (via built-in sqlite3)
+- pytz for IST timezone
+- Threading: each subbot runs in its own thread with its own asyncio loop
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+```
+telegram_bot/
+├── main.py          — entry point (starts DB, subbots, main bot)
+├── config.py        — all env-var-based configuration
+├── database.py      — all SQLite schema + query functions
+├── main_bot.py      — main hub bot handlers + admin commands
+├── sub_bot.py       — quiz subbot handlers, quiz distribution, scheduler
+├── bot_manager.py   — thread registry for managing running subbots
+├── requirements.txt
+├── Procfile         — for Render deployment
+├── render.yaml      — Render deployment config
+└── README.md        — full feature + deployment docs
+```
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Subbots run in daemon threads (one thread per bot) each with its own asyncio event loop — simple and isolated.
+- Quiz polls are re-sent (not forwarded) to each group as new native Telegram quiz polls so answers are tracked per-group.
+- PollAnswerHandler on each subbot tracks correct/wrong and updates marks (+4/−1).
+- Daily 10 PM IST leaderboards are scheduled via APScheduler job_queue on each subbot.
+- SQLite WAL mode for concurrent reads across threads.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Main bot (`@Aman_PersonalBot`):
+- Users create quiz subbots by providing a BotFather token
+- Manage subbots: view status, stats, delete
+- Admin commands: /botstats, /botlist, /userlist, /broadcast, /forward, /info, /Globalforward
+
+Subbots:
+- Subowner sends quiz polls to a "management group", types `/send` in reply → bot distributes to all connected groups
+- Auto leaderboards at 10 PM IST (group-specific + global top-50)
+- Force-join gate, broadcast, forward, stats, /myRank, /leaderboard
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Python only
+- Deploy on Render
+- Bot username: @Aman_PersonalBot
+- Contact link for inactive bots: https://t.me/Aman_PersonalBot
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- For force-join to work, the subbot must be an admin of the target channel/group.
+- Quiz polls must be sent as "Quiz type" (not regular poll) in the management group.
+- On Render, always mount a persistent disk at /data for the SQLite database.
+- After redeploying, all active subbots are automatically relaunched from DB.

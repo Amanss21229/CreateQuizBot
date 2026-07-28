@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: quiz-bot-manager
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: MAIN_BOT_TOKEN
+        value: "8899018478:AAHF08SXk_Mr7FO_TwNk_2fiEM2IEOxiYQQ"   # replace with your token
+      - key: ADMIN_ID
+        value: "0"  # replace with your Telegram user ID
+      - key: DB_PATH
+        value: /data/quiz_bot.db
+    disk:
+      name: bot-data
+      mountPath: /data
+      sizeGB: 1
