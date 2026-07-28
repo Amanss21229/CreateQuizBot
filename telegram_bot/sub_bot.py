@@ -178,11 +178,22 @@ async def cb_open_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_subowner(bot_id, update.effective_user.id):
         await query.answer("⛔ Access denied.", show_alert=True)
         return
-    await query.edit_message_text(
-        "⚙️ <b>Bot Settings</b>\n\nChoose what you want to set up:",
-        reply_markup=settings_keyboard(bot_id),
-        parse_mode=ParseMode.HTML
-    )
+
+    settings_text = "⚙️ <b>Bot Settings</b>\n\nChoose what you want to set up:"
+    settings_kb = settings_keyboard(bot_id)
+
+    # Try plain-text edit first; if the message is a photo/media, fall back to
+    # sending a new text message and deleting the old one.
+    try:
+        await query.edit_message_text(settings_text, reply_markup=settings_kb, parse_mode=ParseMode.HTML)
+    except Exception:
+        try:
+            # Message is a media message — send a fresh text message instead
+            await query.message.reply_text(settings_text, reply_markup=settings_kb, parse_mode=ParseMode.HTML)
+            await query.message.delete()
+        except Exception:
+            # Last resort: just reply without deleting
+            await query.message.reply_text(settings_text, reply_markup=settings_kb, parse_mode=ParseMode.HTML)
 
 
 async def cb_set_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
