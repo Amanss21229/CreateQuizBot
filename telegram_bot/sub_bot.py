@@ -387,40 +387,26 @@ async def cmd_setmgmt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def receive_poll(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    Receives a quiz poll from the subowner.
+    Step 1 of quiz flow:
+    Subowner sends a quiz poll in the management group.
+    Bot saves it immediately and instructs owner to reply with correct option.
 
-    TWO SUPPORTED FLOWS:
-    ─────────────────────────────────────────────────────────────────
-    A) Management Group:
-       Telegram hides correct_option_id from bots in groups.
-       So the bot saves the quiz as pending, then asks the owner
-       to reply with the correct option number (1, 2, 3...).
-       After that, /send is used by replying to the original poll.
-
-    B) Private DM with the bot:
-       Telegram reveals correct_option_id to the bot in private chat.
-       The bot saves immediately and asks owner to reply /send.
-    ─────────────────────────────────────────────────────────────────
+    NOTE: Telegram hides correct_option_id from bots in groups,
+    so we always ask the owner to specify the answer.
     """
     bot_id = get_bot_id_from_app(ctx.application)
     if not update.message or not update.message.poll:
         return
 
-    chat_type = update.effective_chat.type
     sender_id = update.effective_user.id
-
-    # Only subowner can submit quizzes
     if not is_subowner(bot_id, sender_id):
         return
 
     settings = db.get_bot_settings(bot_id)
     mgmt_gid = (settings or {}).get('quiz_management_group_id')
 
-    # Must be either in management group or private DM
-    in_mgmt_group = mgmt_gid and update.effective_chat.id == int(mgmt_gid)
-    in_private = chat_type == 'private'
-
-    if not in_mgmt_group and not in_private:
+    # Only accept from the quiz management group
+    if not mgmt_gid or update.effective_chat.id != int(mgmt_gid):
         return
 
     poll = update.message.poll
@@ -428,7 +414,7 @@ async def receive_poll(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if poll.type != 'quiz':
         await update.message.reply_text(
             "⚠️ <b>Regular poll detected!</b>\n\n"
-            "Please send a <b>Quiz</b> type poll (with a correct answer selected).",
+            "Please send a <b>Quiz</b> type poll (with a correct answer set).",
             parse_mode=ParseMode.HTML
         )
         return
@@ -436,84 +422,43 @@ async def receive_poll(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     options = [opt.text for opt in poll.options]
     num_options = len(options)
 
-    # ── Flow A: Management Group ──────────────────────────────────────────────
-    if in_mgmt_group:
-        # correct_option_id is always None for bots receiving group polls.
-        # Save as pending (correct_option = -1) and ask the owner.
-        quiz_id = db.add_quiz(
-            bot_id=bot_id,
-            question=poll.question,
-            options=options,
-            correct_option=-1,          # placeholder until owner specifies
-            explanation=poll.explanation or "",
-            mgmt_msg_id=update.message.message_id,
-            confirmation_msg_id=0
-        )
-
-        opts_text = "\n".join(
-            f"  <b>{i+1}.</b> {opt}" for i, opt in enumerate(options)
-        )
-        prompt_msg = await update.message.reply_text(
-            f"📥 <b>Quiz received!</b>\n\n"
-            f"📝 <b>Q:</b> {poll.question}\n\n"
-            f"{opts_text}\n\n"
-            f"↩️ <b>Reply to THIS message</b> with the correct option number "
-            f"(<b>1</b> to <b>{num_options}</b>):",
-            parse_mode=ParseMode.HTML
-        )
-
-        # Store in chat_data so the "number" handler can find it
-        ctx.chat_data['pending_quiz'] = {
-            'quiz_id': quiz_id,
-            'prompt_msg_id': prompt_msg.message_id,
-            'poll_msg_id': update.message.message_id,
-            'num_options': num_options,
-            'options': options,
-            'question': poll.question,
-        }
-        return
-
-    # ── Flow B: Private DM ────────────────────────────────────────────────────
-    if poll.correct_option_id is None:
-        await update.message.reply_text(
-            "❌ <b>Could not read the correct answer.</b>\n\n"
-            "Make sure you send the quiz poll <b>directly here</b> "
-            "(don't forward from a group — Telegram hides the answer in that case).",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
+    # Save quiz with placeholder correct_option (-1 = not set yet)
     quiz_id = db.add_quiz(
         bot_id=bot_id,
         question=poll.question,
         options=options,
-        correct_option=poll.correct_option_id,
+        correct_option=-1,
         explanation=poll.explanation or "",
         mgmt_msg_id=update.message.message_id,
         confirmation_msg_id=0
     )
 
-    groups = db.get_bot_groups(bot_id)
-    connected = len([g for g in groups if g['group_type'] in ('group', 'supergroup', 'channel')])
+    opts_text = "\n".join(
+        f"  {'ABCD'[i]}. {opt}" for i, opt in enumerate(options)
+    )
 
-    confirm_msg = await update.message.reply_text(
-        f"✅ <b>Quiz saved!</b>\n\n"
-        f"📝 <b>Q:</b> {poll.question}\n"
-        f"✔️ <b>Correct:</b> {options[poll.correct_option_id]}\n\n"
-        f"🏘️ Connected groups: <b>{connected}</b>\n\n"
-        f"↩️ <b>Reply to THIS message with</b> <code>/send</code> <b>to distribute.</b>",
+    await update.message.reply_text(
+        f"📥 <b>Quiz saved!</b>\n\n"
+        f"📝 <b>Q:</b> {poll.question}\n\n"
+        f"{opts_text}\n\n"
+        f"↩️ <b>Reply to the quiz poll above</b> with the correct option:\n"
+        f"<code>1</code>–<code>{num_options}</code>  or  "
+        f"<code>{'</code> / <code>'.join(list('ABCD')[:num_options])}</code>\n\n"
+        f"Quiz will be sent to all groups <b>automatically</b> after you set the answer.",
         parse_mode=ParseMode.HTML
     )
-    db.update_quiz_confirmation_msg(quiz_id, confirm_msg.message_id)
 
 
-# ─── Correct option reply handler (management group) ─────────────────────────
+# ─── Step 2: owner replies to quiz poll with correct option ──────────────────
 
 async def receive_correct_option(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    In the management group, after the bot asks 'which option is correct?',
-    the subowner replies to the prompt message with a number like '2'.
-    This handler picks that up, validates, and finalises the pending quiz.
+    Step 2 of quiz flow:
+    Subowner replies DIRECTLY to the original quiz poll message with
+    the correct option — e.g. '2', 'B', 'b'.
+
+    Once validated, the quiz is distributed to all connected groups
+    automatically after a 30-second countdown.
     """
     bot_id = get_bot_id_from_app(ctx.application)
     if not update.message or not update.message.text:
@@ -528,62 +473,141 @@ async def receive_correct_option(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     if not mgmt_gid or update.effective_chat.id != int(mgmt_gid):
         return
 
-    pending = ctx.chat_data.get('pending_quiz')
-    if not pending:
-        return
-
-    # Only handle if this is a reply to the bot's prompt message
+    # Must be a reply to some message
     replied = update.message.reply_to_message
-    if not replied or replied.message_id != pending['prompt_msg_id']:
+    if not replied:
         return
 
-    text = update.message.text.strip()
-    if not text.isdigit():
+    # That replied-to message must be a quiz poll saved in our DB
+    quiz = db.get_quiz_by_mgmt_msg(bot_id, replied.message_id)
+    if not quiz:
+        return  # not a quiz poll we know about — ignore silently
+
+    text = update.message.text.strip().upper()
+
+    # Accept: 1/2/3/4  OR  A/B/C/D
+    letter_map = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
+    options = quiz['options']
+    num_options = len(options)
+
+    correct_idx = None
+    if text.isdigit():
+        n = int(text)
+        if 1 <= n <= num_options:
+            correct_idx = n - 1
+    elif text in letter_map and letter_map[text] < num_options:
+        correct_idx = letter_map[text]
+
+    if correct_idx is None:
+        valid = ' / '.join(
+            [str(i+1) for i in range(num_options)] +
+            list('ABCD')[:num_options]
+        )
         await update.message.reply_text(
-            f"⚠️ Please send a number between 1 and {pending['num_options']}."
+            f"⚠️ Invalid option. Please reply with: {valid}"
         )
         return
 
-    choice = int(text)
-    if choice < 1 or choice > pending['num_options']:
-        await update.message.reply_text(
-            f"⚠️ Invalid option. Please send a number between 1 and {pending['num_options']}."
-        )
-        return
-
-    correct_idx = choice - 1  # convert to 0-based
-    quiz_id = pending['quiz_id']
-
-    # Update correct_option in DB
-    db.update_quiz_correct_option(quiz_id, correct_idx)
+    # Save correct answer
+    db.update_quiz_correct_option(quiz['id'], correct_idx)
 
     groups = db.get_bot_groups(bot_id)
-    connected = len([g for g in groups if g['group_type'] in ('group', 'supergroup', 'channel')])
+    target_groups = [
+        g for g in groups
+        if g['group_id'] != int(mgmt_gid)
+    ]
+    num_groups = len(target_groups)
 
-    await update.message.reply_text(
-        f"✅ <b>Correct answer set!</b>\n\n"
-        f"📝 <b>Q:</b> {pending['question']}\n"
-        f"✔️ <b>Correct:</b> {pending['options'][correct_idx]}\n\n"
-        f"🏘️ Connected groups: <b>{connected}</b>\n\n"
-        f"↩️ <b>Now reply to the original quiz poll</b> with <code>/send</code> to distribute.",
+    if num_groups == 0:
+        await update.message.reply_text(
+            f"✅ <b>Correct answer set:</b> {options[correct_idx]}\n\n"
+            "⚠️ <b>No connected groups found!</b> Add the bot to groups first.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # Send countdown message — we'll edit it after distribution
+    status_msg = await update.message.reply_text(
+        f"✅ <b>Correct answer set:</b> {options[correct_idx]}\n\n"
+        f"⏳ Sending to <b>{num_groups}</b> group(s) in <b>30 seconds</b>…",
         parse_mode=ParseMode.HTML
     )
 
-    # Clear pending
-    ctx.chat_data.pop('pending_quiz', None)
+    # Schedule background distribution after 30 seconds
+    asyncio.create_task(
+        _auto_distribute(
+            app=ctx.application,
+            bot_id=bot_id,
+            quiz_id=quiz['id'],
+            mgmt_gid=int(mgmt_gid),
+            status_chat_id=update.effective_chat.id,
+            status_msg_id=status_msg.message_id,
+            delay=30,
+        )
+    )
 
 
-# ─── /send — distribute quiz to all groups ───────────────────────────────────
+async def _auto_distribute(app, bot_id: int, quiz_id: int, mgmt_gid: int,
+                            status_chat_id: int, status_msg_id: int, delay: int = 30):
+    """Background task: wait `delay` seconds then send quiz to all connected groups."""
+    await asyncio.sleep(delay)
+
+    quiz = db.get_quiz_by_id(quiz_id)
+    if not quiz or quiz['correct_option'] < 0:
+        return
+
+    groups = db.get_bot_groups(bot_id)
+    target_groups = [g for g in groups if g['group_id'] != mgmt_gid]
+
+    success, fail = 0, 0
+    start = asyncio.get_event_loop().time()
+
+    for grp in target_groups:
+        try:
+            sent = await app.bot.send_poll(
+                chat_id=grp['group_id'],
+                question=quiz['question'],
+                options=quiz['options'],
+                type='quiz',
+                correct_option_id=quiz['correct_option'],
+                explanation=quiz.get('explanation') or None,
+                is_anonymous=False,
+            )
+            db.add_quiz_send(
+                quiz['id'], grp['group_id'], sent.message_id,
+                sent.poll.id if sent.poll else ""
+            )
+            success += 1
+        except Exception as e:
+            logger.warning(f"[auto_distribute] Failed for group {grp['group_id']}: {e}")
+            fail += 1
+
+    elapsed = round(asyncio.get_event_loop().time() - start, 1)
+
+    # Edit the countdown message with the final report
+    try:
+        await app.bot.edit_message_text(
+            chat_id=status_chat_id,
+            message_id=status_msg_id,
+            text=(
+                f"📊 <b>Quiz Distribution Complete</b>\n\n"
+                f"✅ Sent: <b>{success}</b> group(s)\n"
+                f"❌ Failed: <b>{fail}</b>\n"
+                f"⏱️ Time: <b>{elapsed}s</b>"
+            ),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+
+# ─── /send — manual override ──────────────────────────────────────────────────
 
 async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    Distribute a saved quiz to all connected groups.
-
-    Works in TWO contexts:
-    ─────────────────────────────────────────────────────────────────
-    A) Management Group — reply to the original quiz poll message.
-    B) Private DM      — reply to the bot's confirmation message.
-    ─────────────────────────────────────────────────────────────────
+    Manual override: reply to a saved quiz poll in the management group
+    with /send to distribute it immediately (bypasses the 30-second wait).
+    Useful if auto-distribution was skipped or you want to resend.
     """
     bot_id = get_bot_id_from_app(ctx.application)
     bot_info = db.get_bot_by_id(bot_id)
@@ -596,68 +620,52 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Only the bot owner can send quizzes.")
         return
 
-    if not update.message.reply_to_message:
-        await update.message.reply_text(
-            "↩️ <b>Reply to a quiz message with</b> <code>/send</code> <b>to distribute it.</b>\n\n"
-            "• In the management group → reply to the original quiz poll.\n"
-            "• In private chat → reply to the bot's confirmation message.",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
     settings = db.get_bot_settings(bot_id)
     mgmt_gid = (settings or {}).get('quiz_management_group_id')
-    replied = update.message.reply_to_message
-    chat_type = update.effective_chat.type
 
-    # ── Resolve which quiz this /send refers to ───────────────────────────────
-    quiz = None
-
-    if mgmt_gid and update.effective_chat.id == int(mgmt_gid):
-        # Management group: replied message is the original quiz poll
-        quiz = db.get_quiz_by_mgmt_msg(bot_id, replied.message_id)
-    elif chat_type == 'private':
-        # Private DM: replied message is the bot's confirmation message
-        quiz = db.get_quiz_by_confirmation_msg(bot_id, replied.message_id)
-    else:
+    if not mgmt_gid or update.effective_chat.id != int(mgmt_gid):
         await update.message.reply_text(
-            "⚠️ Use /send in the management group or in a private chat with me."
+            "⚠️ /send only works in the quiz management group.\n"
+            "Reply to a quiz poll with /send to distribute it immediately."
         )
         return
 
+    if not update.message.reply_to_message:
+        await update.message.reply_text(
+            "↩️ Reply to a quiz poll message with /send to distribute it."
+        )
+        return
+
+    quiz = db.get_quiz_by_mgmt_msg(bot_id, update.message.reply_to_message.message_id)
     if not quiz:
         await update.message.reply_text(
-            "❌ No quiz found for that message.\n\n"
-            "• In the management group, reply to the <b>original quiz poll</b>.\n"
-            "• In private chat, reply to my <b>confirmation message</b>.",
-            parse_mode=ParseMode.HTML
+            "❌ No saved quiz found for that message.\n"
+            "Send a quiz poll here first — the bot will save it automatically."
         )
         return
 
-    # Validate correct_option was set
     if quiz['correct_option'] < 0:
         await update.message.reply_text(
-            "⚠️ <b>Correct answer not set yet!</b>\n\n"
-            "Please reply to the bot's prompt in the management group with the correct option number first.",
+            "⚠️ <b>Correct answer not set!</b>\n\n"
+            "Reply to the quiz poll with the correct option (1/2/3/4 or A/B/C/D) first.",
             parse_mode=ParseMode.HTML
         )
         return
 
     groups = db.get_bot_groups(bot_id)
-    # Exclude management group from distribution
-    target_groups = [g for g in groups if not (mgmt_gid and g['group_id'] == int(mgmt_gid))]
+    target_groups = [g for g in groups if g['group_id'] != int(mgmt_gid)]
 
     if not target_groups:
         await update.message.reply_text(
-            "⚠️ <b>No connected groups yet!</b>\n\n"
-            "Add the bot to your groups first, then try again.",
-            parse_mode=ParseMode.HTML
+            "⚠️ No connected groups yet! Add the bot to groups first."
         )
         return
 
-    status_msg = await update.message.reply_text(f"⏳ Sending to {len(target_groups)} groups/channels...")
-    start_time = asyncio.get_event_loop().time()
+    status_msg = await update.message.reply_text(
+        f"⏳ Sending to {len(target_groups)} group(s)…"
+    )
     success, fail = 0, 0
+    start = asyncio.get_event_loop().time()
 
     for grp in target_groups:
         try:
@@ -669,21 +677,20 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 correct_option_id=quiz['correct_option'],
                 explanation=quiz.get('explanation') or None,
                 is_anonymous=False,
-                open_period=None,
             )
             db.add_quiz_send(quiz['id'], grp['group_id'], sent.message_id,
                              sent.poll.id if sent.poll else "")
             success += 1
         except Exception as e:
-            logger.warning(f"Failed to send quiz to {grp['group_id']}: {e}")
+            logger.warning(f"cmd_send failed for group {grp['group_id']}: {e}")
             fail += 1
 
-    elapsed = round(asyncio.get_event_loop().time() - start_time, 1)
+    elapsed = round(asyncio.get_event_loop().time() - start, 1)
     await status_msg.edit_text(
         f"📊 <b>Quiz Distribution Report</b>\n\n"
-        f"✅ Sent successfully: <b>{success}</b> groups/channels\n"
+        f"✅ Sent: <b>{success}</b> group(s)\n"
         f"❌ Failed: <b>{fail}</b>\n"
-        f"⏱️ Time taken: <b>{elapsed}s</b>",
+        f"⏱️ Time: <b>{elapsed}s</b>",
         parse_mode=ParseMode.HTML
     )
 
