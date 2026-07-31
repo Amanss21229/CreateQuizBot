@@ -7,10 +7,11 @@ from config import DB_PATH
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")   # wait up to 30s on lock
     return conn
 
 
@@ -80,6 +81,7 @@ def init_db():
         correct_option               INTEGER NOT NULL,
         explanation                  TEXT,
         mgmt_group_message_id        INTEGER,
+        confirmation_msg_id          INTEGER,
         created_at                   TEXT DEFAULT (datetime('now'))
     );
 
@@ -309,13 +311,14 @@ def count_bot_groups(bot_id: int) -> int:
 # ─── Quiz helpers ─────────────────────────────────────────────────────────────
 
 def add_quiz(bot_id: int, question: str, options: list, correct_option: int,
-             explanation: str, mgmt_msg_id: int) -> int:
+             explanation: str, mgmt_msg_id: int, confirmation_msg_id: int = 0) -> int:
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        "INSERT INTO quizzes(bot_id,question,options,correct_option,explanation,mgmt_group_message_id) "
-        "VALUES(?,?,?,?,?,?)",
-        (bot_id, question, json.dumps(options), correct_option, explanation or "", mgmt_msg_id)
+        "INSERT INTO quizzes(bot_id,question,options,correct_option,explanation,"
+        "mgmt_group_message_id,confirmation_msg_id) VALUES(?,?,?,?,?,?,?)",
+        (bot_id, question, json.dumps(options), correct_option,
+         explanation or "", mgmt_msg_id, confirmation_msg_id)
     )
     quiz_id = c.lastrowid
     conn.commit()
@@ -323,11 +326,41 @@ def add_quiz(bot_id: int, question: str, options: list, correct_option: int,
     return quiz_id
 
 
+def update_quiz_correct_option(quiz_id: int, correct_option: int):
+    conn = get_conn()
+    conn.execute("UPDATE quizzes SET correct_option=? WHERE id=?",
+                 (correct_option, quiz_id))
+    conn.commit()
+    conn.close()
+
+
+def update_quiz_confirmation_msg(quiz_id: int, confirmation_msg_id: int):
+    conn = get_conn()
+    conn.execute("UPDATE quizzes SET confirmation_msg_id=? WHERE id=?",
+                 (confirmation_msg_id, quiz_id))
+    conn.commit()
+    conn.close()
+
+
 def get_quiz_by_mgmt_msg(bot_id: int, msg_id: int) -> Optional[Dict]:
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM quizzes WHERE bot_id=? AND mgmt_group_message_id=?",
         (bot_id, msg_id)
+    ).fetchone()
+    conn.close()
+    if row:
+        d = dict(row)
+        d['options'] = json.loads(d['options'])
+        return d
+    return None
+
+
+def get_quiz_by_confirmation_msg(bot_id: int, confirmation_msg_id: int) -> Optional[Dict]:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM quizzes WHERE bot_id=? AND confirmation_msg_id=?",
+        (bot_id, confirmation_msg_id)
     ).fetchone()
     conn.close()
     if row:

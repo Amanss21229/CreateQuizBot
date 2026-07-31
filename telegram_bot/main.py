@@ -38,7 +38,11 @@ async def main():
         await app.initialize()
         await app.start()
         logger.info("Main bot is running. Press Ctrl+C to stop.")
-        await app.updater.start_polling(drop_pending_updates=True)
+        from telegram import Update as _Update
+        await app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=_Update.ALL_TYPES,
+        )
         # Block forever
         await asyncio.Event().wait()
 

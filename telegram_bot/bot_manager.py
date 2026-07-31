@@ -41,7 +41,11 @@ def _run_subbot(bot_id: int, token: str):
         async with app:
             await app.initialize()
             await app.start()
-            await app.updater.start_polling(drop_pending_updates=True)
+            from telegram import Update as _Update
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=_Update.ALL_TYPES,
+            )
             # Keep running until the stop event is set
             stop_event = _registry[bot_id]['stop_event']
             while not stop_event.is_set():
