@@ -109,6 +109,19 @@ def init_db():
     );
     """)
     conn.commit()
+
+    # ── Migrations: add columns that may be missing in older DBs ──────────────
+    migrations = [
+        ("quizzes", "confirmation_msg_id", "INTEGER DEFAULT 0"),
+    ]
+    for table, column, col_def in migrations:
+        existing = [
+            row[1]
+            for row in c.execute(f"PRAGMA table_info({table})").fetchall()
+        ]
+        if column not in existing:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+    conn.commit()
     conn.close()
 
 
