@@ -68,6 +68,30 @@ async def myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📚 <b>Quiz Bot Manager — Help</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "👤 <b>For Everyone</b>\n"
+        "┌ /start — Open the main menu\n"
+        "├ /help — Show this help message\n"
+        "└ /myid — Get your Telegram user ID\n\n"
+
+        "🤖 <b>Managing Your Bots</b>\n"
+        "┌ Tap <b>🤖 Create Quiz Bot</b> — Connect a new bot using its token\n"
+        "└ Tap <b>📋 My Bots</b> — View status, stats, or delete your bots\n\n"
+
+        "📝 <b>How to Get a Bot Token</b>\n"
+        "┌ 1. Open @BotFather on Telegram\n"
+        "├ 2. Send /newbot and follow the steps\n"
+        "└ 3. Copy the token and paste it here\n\n"
+
+        "💡 <i>Each bot you create becomes a full quiz bot your audience can use!</i>"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
 # ─── Create Bot flow ──────────────────────────────────────────────────────────
 
 HOW_TO_GET_TOKEN = """
@@ -622,6 +646,7 @@ def build_main_app(token: str) -> Application:
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CommandHandler("botstats", cmd_botstats))
     app.add_handler(CommandHandler("botlist", cmd_botlist))

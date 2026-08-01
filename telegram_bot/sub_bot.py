@@ -1287,6 +1287,8 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("adminhelp", cmd_adminhelp))
     app.add_handler(CommandHandler("setmgmt", cmd_setmgmt))
     app.add_handler(CommandHandler("send", cmd_send))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
