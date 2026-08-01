@@ -697,12 +697,53 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── Poll answer handler ──────────────────────────────────────────────────────
 
+# ─── Congratulation & Roast message pools ─────────────────────────────────────
+
+_CORRECT_MSGS = [
+    "🎉 Waah {name}! Bilkul sahi jawab! <b>+{marks}</b> marks mil gaye! 🔥 Tu toh genius hai!",
+    "🏆 {name} ne ek aur sahi jawab diya! <b>+{marks}</b> marks! Aage bhi aise hi chamkate raho! ✨",
+    "🧠 Dimag toh hai {name} ke paas! Sahi jawab! <b>+{marks}</b> marks pocket mein! 💰",
+    "💯 {name} — Perfect! Yahi toh chahiye tha! <b>+{marks}</b> marks add ho gaye! 🎯",
+    "🌟 Kya baat hai {name}! Sahi pakda! <b>+{marks}</b> marks! Leaderboard mein aur upar jaoge! 🚀",
+    "🔥 {name} is on fire! Correct answer! <b>+{marks}</b> marks! Koi rokne wala nahi hai! 💪",
+    "🎊 Zabardast {name}! Bilkul sahi! <b>+{marks}</b> marks! Tu toh topper material hai! 📚",
+    "😎 {name} ne fir se baazi maari! Correct! <b>+{marks}</b> marks! Champion ka jawaab! 🏅",
+    "🥇 {name} — Gold standard answer! <b>+{marks}</b> marks! Keep it up! 👑",
+    "⚡ {name} ne lightning speed se sahi jawab diya! <b>+{marks}</b> marks! Unbeatable! 🏆",
+    "🎯 Bullseye {name}! Sahi jawab! <b>+{marks}</b> marks! Tu kahaan se padhta hai yaar? 📖",
+    "✅ Correct! {name} phir se sab ko peeche chhod gaya! <b>+{marks}</b> marks mila! 😏",
+    "🌈 Wah wah {name}! Ekdum sahi! <b>+{marks}</b> marks! Duniya dekh rahi hai tujhe! 🌍",
+    "💥 {name} ka jawab CORRECT! <b>+{marks}</b> marks! Yeh banda rok nahi sakta koi! 🛑❌",
+    "🦁 {name} jaise sher ka jawab — bilkul sahi! <b>+{marks}</b> marks! Roar! 🔊",
+]
+
+_WRONG_MSGS = [
+    "😂 Arre {name}! Yeh kya jawab diya? <b>{marks}</b> marks! Kal thoda padhke aana! 📖",
+    "🤦 {name} bhai... itna asaan sawal tha! <b>{marks}</b> marks! Kitaab kab se dost bani? 😅",
+    "💀 {name} ka jawab sun ke toh question bhi ro pada! <b>{marks}</b> marks! Koshish karo! 😭",
+    "🙈 {name} ne jo jawab diya woh sun ke teacher retire ho gayi! <b>{marks}</b> marks! 😆",
+    "🤡 {name} — Confidence full, knowledge zero! <b>{marks}</b> marks! Google karo bhai! 🔍",
+    "😬 {name} bhai, yeh wala jawab toh dictionary mein bhi galat likha hua hoga! <b>{marks}</b> marks!",
+    "🫠 {name} ka jawab dekh ke AI bhi confuse ho gaya! <b>{marks}</b> marks! Kal aana! 📅",
+    "😏 {name}, andaaze se jawab diya? Andaaza bhi galat! <b>{marks}</b> marks! Try again! 🎲",
+    "🪄 {name} ne jawab aise diya jaise magic se aayega... nahi aaya! <b>{marks}</b> marks! ✨❌",
+    "📉 {name} ka score dekhke leaderboard bhi sharmaaya! <b>{marks}</b> marks! Himmat rakho! 💪",
+    "🤭 {name} bhai, ispe toh Google bhi tujhse agree nahi karega! <b>{marks}</b> marks! 😂",
+    "🫣 {name} ne jawab chhupaane ki koshish ki... lekin galat tha fir bhi! <b>{marks}</b> marks!",
+    "🐢 {name} — Slow bhi, galat bhi! <b>{marks}</b> marks! Koi nahi, agle quiz mein dekh lena! 🔄",
+    "😴 {name} ne neend mein jawab diya lagta hai! <b>{marks}</b> marks! Uthke padhlo! ⏰",
+    "🎭 {name} ka jawab ek nayi comedy movie ki script ban sakti hai! <b>{marks}</b> marks! 🎬",
+]
+
+
 async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    import random
     bot_id = get_bot_id_from_app(ctx.application)
     answer = update.poll_answer
     poll_id = answer.poll_id
     user_id = answer.user.id
-    db.upsert_bot_user(bot_id, user_id, answer.user.username, answer.user.first_name)
+    first_name = answer.user.first_name or "User"
+    db.upsert_bot_user(bot_id, user_id, answer.user.username, first_name)
 
     quiz_info = db.get_quiz_by_poll_id(poll_id)
     if not quiz_info:
@@ -710,8 +751,7 @@ async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     selected = answer.option_ids[0] if answer.option_ids else None
     if selected is None:
-        # User retracted answer - skip
-        return
+        return  # user retracted answer
 
     is_correct = (selected == quiz_info['correct_option'])
     marks = MARKS_CORRECT if is_correct else MARKS_WRONG
@@ -726,6 +766,97 @@ async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         is_correct=is_correct,
         marks=marks
     )
+
+    # ── Send congratulation or roast to the group ─────────────────────────────
+    group_id = quiz_info['group_id']
+    user_link = f'<a href="tg://user?id={user_id}">{first_name}</a>'
+    marks_display = f"+{marks}" if marks > 0 else str(marks)
+
+    pool = _CORRECT_MSGS if is_correct else _WRONG_MSGS
+    template = random.choice(pool)
+    msg = template.format(name=user_link, marks=marks_display)
+
+    try:
+        await ctx.application.bot.send_message(
+            chat_id=group_id,
+            text=msg,
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.warning(f"Could not send feedback to group {group_id}: {e}")
+
+
+# ─── /help ────────────────────────────────────────────────────────────────────
+
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📚 <b>Quiz Bot — Commands</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "👤 <b>For Everyone</b>\n"
+        "┌ /start — Welcome message & bot info\n"
+        "├ /help — Show this commands list\n"
+        "├ /leaderboard — Top scorers of this group\n"
+        "└ /myRank — Your personal rank & score\n\n"
+
+        "📝 <b>How Quizzes Work</b>\n"
+        "┌ Quiz polls are sent here automatically\n"
+        "├ Answer the poll to earn marks\n"
+        "├ ✅ Correct answer → <b>+4 marks</b>\n"
+        "└ ❌ Wrong answer → <b>-1 mark</b>\n\n"
+
+        "🏆 <b>Leaderboard</b>\n"
+        "└ Top scorers announced daily at 10 PM\n\n"
+
+        "💡 <i>Use /adminhelp to see owner/admin commands</i>"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+# ─── /adminhelp ───────────────────────────────────────────────────────────────
+
+async def cmd_adminhelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    bot_id = get_bot_id_from_app(ctx.application)
+    if not is_subowner(bot_id, update.effective_user.id):
+        await update.message.reply_text("⛔ This command is only for the bot owner.")
+        return
+
+    text = (
+        "🛡️ <b>Admin & Owner Commands</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "⚙️ <b>Bot Setup (Owner)</b>\n"
+        "┌ /start — Open settings panel\n"
+        "├ /setmgmt — Set this group as quiz management group\n"
+        "│   (run this in the group you'll send quizzes from)\n"
+        "└ /status — Show bot status & connected groups count\n\n"
+
+        "📤 <b>Quiz Flow (Owner)</b>\n"
+        "┌ 1. Send a Quiz poll in the management group\n"
+        "├ 2. Reply to that poll with correct option: <code>1/2/3/4</code> or <code>A/B/C/D</code>\n"
+        "├ 3. Quiz auto-distributes to all groups in 30 seconds\n"
+        "└ /send — Manual override: reply to a saved quiz poll to send immediately\n\n"
+
+        "📊 <b>Statistics (Owner)</b>\n"
+        "┌ /stats — Total users, groups, quizzes sent\n"
+        "└ /leaderboard — Group leaderboard (works everywhere)\n\n"
+
+        "📣 <b>Broadcast (Owner)</b>\n"
+        "┌ /broadcast <code>[text]</code> — Send a message to all bot users\n"
+        "└ /forward — Reply to a message to forward it to all users\n\n"
+
+        "🔗 <b>Force Join (Owner)</b>\n"
+        "┌ /fjoin <code>[link]</code> — Set a force-join channel link\n"
+        "└ /removefjoin — Remove the force-join requirement\n\n"
+
+        "🔧 <b>Main Admin Only</b>\n"
+        "┌ /activate — Activate this bot\n"
+        "├ /inactive — Deactivate this bot\n"
+        "└ /botstatus — Show current active/inactive status\n\n"
+
+        "💡 <i>Users can use /help to see their commands</i>"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 # ─── Group tracking ───────────────────────────────────────────────────────────
