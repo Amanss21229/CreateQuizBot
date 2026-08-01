@@ -56,6 +56,7 @@ def init_db():
         group_name     TEXT,
         group_username TEXT,
         group_type     TEXT,
+        language       TEXT DEFAULT 'en',
         added_at       TEXT DEFAULT (datetime('now')),
         UNIQUE(bot_id, group_id)
     );
@@ -115,6 +116,7 @@ def init_db():
     migrations = [
         ("quizzes",       "confirmation_msg_id", "INTEGER DEFAULT 0"),
         ("bot_settings",  "language",            "TEXT DEFAULT 'en'"),
+        ("bot_groups",    "language",            "TEXT DEFAULT 'en'"),
     ]
     for table, column, col_def in migrations:
         existing = [
@@ -279,6 +281,30 @@ def set_bot_language(bot_id: int, language: str):
     conn = get_conn()
     conn.execute(
         "UPDATE bot_settings SET language=? WHERE bot_id=?", (language, bot_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_group_language(bot_id: int, group_id: int) -> str:
+    """Return the language for a specific group ('en' or 'hi'). Defaults to 'en'."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT language FROM bot_groups WHERE bot_id=? AND group_id=?",
+        (bot_id, group_id)
+    ).fetchone()
+    conn.close()
+    if row and row[0]:
+        return row[0]
+    return 'en'
+
+
+def set_group_language(bot_id: int, group_id: int, language: str):
+    """Set the language for a specific group ('en' or 'hi')."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE bot_groups SET language=? WHERE bot_id=? AND group_id=?",
+        (language, bot_id, group_id)
     )
     conn.commit()
     conn.close()

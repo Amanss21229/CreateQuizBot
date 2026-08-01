@@ -128,8 +128,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Register user
     db.upsert_bot_user(bot_id, user.id, user.username, user.first_name)
 
-    # Check inactive
-    lang = db.get_bot_language(bot_id)
+    # Check inactive (private chat — default to 'en')
+    lang = 'en'
     if bot_info['status'] == 'inactive':
         await send_inactive_msg(update, lang)
         return
@@ -553,14 +553,16 @@ async def _auto_distribute(app, bot_id: int, quiz_id: int, mgmt_gid: int,
     groups = db.get_bot_groups(bot_id)
     target_groups = [g for g in groups if g['group_id'] != mgmt_gid]
 
-    # Translate quiz if Hindi mode
-    lang = db.get_bot_language(bot_id)
-    question, options, explanation = await _translate_quiz(quiz, lang)
-
+    # Translate quiz per group language (cache to avoid redundant API calls)
+    translation_cache: dict = {}
     success, fail = 0, 0
     start = asyncio.get_event_loop().time()
 
     for grp in target_groups:
+        grp_lang = db.get_group_language(bot_id, grp['group_id'])
+        if grp_lang not in translation_cache:
+            translation_cache[grp_lang] = await _translate_quiz(quiz, grp_lang)
+        question, options, explanation = translation_cache[grp_lang]
         try:
             sent = await app.bot.send_poll(
                 chat_id=grp['group_id'],
@@ -659,17 +661,19 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Translate if Hindi mode
-    lang = db.get_bot_language(bot_id)
-    question, options, explanation = await _translate_quiz(quiz, lang)
-
     status_msg = await update.message.reply_text(
         f"⏳ Sending to {len(target_groups)} group(s)…"
     )
+    # Translate per group language (cache to avoid redundant API calls)
+    translation_cache: dict = {}
     success, fail = 0, 0
     start = asyncio.get_event_loop().time()
 
     for grp in target_groups:
+        grp_lang = db.get_group_language(bot_id, grp['group_id'])
+        if grp_lang not in translation_cache:
+            translation_cache[grp_lang] = await _translate_quiz(quiz, grp_lang)
+        question, options, explanation = translation_cache[grp_lang]
         try:
             sent = await ctx.application.bot.send_poll(
                 chat_id=grp['group_id'],
@@ -883,10 +887,10 @@ async def cmd_adminhelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── /language ───────────────────────────────────────────────────────────────
 
-def _language_keyboard(bot_id: int, lang: str) -> InlineKeyboardMarkup:
+def _language_keyboard(bot_id: int, group_id: int, lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(t('language_btn_en', lang), callback_data=f"set_lang:{bot_id}:en"),
-        InlineKeyboardButton(t('language_btn_hi', lang), callback_data=f"set_lang:{bot_id}:hi"),
+        InlineKeyboardButton(t('language_btn_en', lang), callback_data=f"set_lang:{bot_id}:{group_id}:en"),
+        InlineKeyboardButton(t('language_btn_hi', lang), callback_data=f"set_lang:{bot_id}:{group_id}:hi"),
     ]])
 
 
@@ -909,7 +913,16 @@ async def cmd_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
     user = update.effective_user
     chat = update.effective_chat
-    lang = db.get_bot_language(bot_id)
+
+    # /language only makes sense inside a group (it sets that group's language)
+    if chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text(
+            "ℹ️ Use /language inside a group to set the language for that group.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    lang = db.get_group_language(bot_id, chat.id)
 
     allowed = await _check_language_permission(
         bot_id, user.id, chat.type, chat.id, ctx.application.bot
@@ -926,7 +939,7 @@ async def cmd_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(
         text,
-        reply_markup=_language_keyboard(bot_id, lang),
+        reply_markup=_language_keyboard(bot_id, chat.id, lang),
         parse_mode=ParseMode.HTML
     )
 
@@ -934,9 +947,10 @@ async def cmd_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cb_set_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    parts = query.data.split(":")           # set_lang:bot_id:lang_code
+    parts = query.data.split(":")           # set_lang:bot_id:group_id:lang_code
     bot_id = int(parts[1])
-    new_lang = parts[2]
+    group_id = int(parts[2])
+    new_lang = parts[3]
     user = update.effective_user
     chat = update.effective_chat
 
@@ -947,7 +961,7 @@ async def cb_set_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer(t('language_no_permission', new_lang), show_alert=True)
         return
 
-    db.set_bot_language(bot_id, new_lang)
+    db.set_group_language(bot_id, group_id, new_lang)
 
     msg_key = 'language_set_hi' if new_lang == 'hi' else 'language_set_en'
     current_key = 'language_current_hi' if new_lang == 'hi' else 'language_current_en'
@@ -959,7 +973,7 @@ async def cb_set_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     await query.edit_message_text(
         text,
-        reply_markup=_language_keyboard(bot_id, new_lang),
+        reply_markup=_language_keyboard(bot_id, group_id, new_lang),
         parse_mode=ParseMode.HTML
     )
 
@@ -977,7 +991,8 @@ async def chat_member_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
         db.upsert_bot_group(bot_id, chat.id, chat.title, chat.username or "", chat.type)
         if chat.type in ('group', 'supergroup'):
-            lang = db.get_bot_language(bot_id)
+            # New group defaults to 'en'; use get_group_language for existing ones
+            lang = db.get_group_language(bot_id, chat.id)
             try:
                 await ctx.application.bot.send_message(
                     chat.id,
@@ -995,7 +1010,8 @@ async def chat_member_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
     bot_info = db.get_bot_by_id(bot_id)
-    lang = db.get_bot_language(bot_id)
+    chat = update.effective_chat
+    lang = db.get_group_language(bot_id, chat.id) if chat.type in ('group', 'supergroup') else 'en'
     if bot_info and bot_info['status'] == 'inactive':
         await send_inactive_msg(update, lang)
         return
@@ -1052,7 +1068,8 @@ async def cmd_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_myrank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
     bot_info = db.get_bot_by_id(bot_id)
-    lang = db.get_bot_language(bot_id)
+    chat = update.effective_chat
+    lang = db.get_group_language(bot_id, chat.id) if chat.type in ('group', 'supergroup') else 'en'
     if bot_info and bot_info['status'] == 'inactive':
         await send_inactive_msg(update, lang)
         return
@@ -1280,30 +1297,39 @@ async def send_daily_leaderboards(ctx: ContextTypes.DEFAULT_TYPE):
     date_str = datetime.now(ist).strftime("%d %B %Y")
     medals = ["🥇", "🥈", "🥉"]
 
-    lang = db.get_bot_language(bot_id)
-
-    # Global leaderboard
+    # Pre-fetch global leaderboard data (same for all groups)
     global_lb = db.get_global_leaderboard(bot_id, limit=GLOBAL_LEADERBOARD_LIMIT)
-    global_text = t('lb_daily_global_header', lang, limit=GLOBAL_LEADERBOARD_LIMIT, date=date_str)
-    global_text += "━" * 30 + "\n\n"
-    if global_lb:
-        for i, entry in enumerate(global_lb):
-            rank_icon = medals[i] if i < 3 else f"#{i+1}"
-            name = entry.get('first_name') or "User"
-            global_text += t('lb_global_row', lang,
-                              rank=rank_icon, name=user_link(entry['user_id'], name),
-                              marks=entry['total_marks'])
-    else:
-        global_text += t('lb_no_attempts_daily', lang)
+    settings = db.get_bot_settings(bot_id)
+    mgmt_gid = (settings or {}).get('quiz_management_group_id')
+
+    # Cache per-language global texts to avoid rebuilding for groups with same lang
+    global_text_cache: dict = {}
 
     for grp in groups:
         group_id = grp['group_id']
         group_name = grp['group_name']
         group_username = grp.get('group_username', '')
-        settings = db.get_bot_settings(bot_id)
-        mgmt_gid = (settings or {}).get('quiz_management_group_id')
         if group_id == mgmt_gid:
             continue
+
+        # Each group may have its own language
+        lang = db.get_group_language(bot_id, group_id)
+
+        # Build global LB text for this language (cached)
+        if lang not in global_text_cache:
+            g_text = t('lb_daily_global_header', lang, limit=GLOBAL_LEADERBOARD_LIMIT, date=date_str)
+            g_text += "━" * 30 + "\n\n"
+            if global_lb:
+                for i, entry in enumerate(global_lb):
+                    rank_icon = medals[i] if i < 3 else f"#{i+1}"
+                    name = entry.get('first_name') or "User"
+                    g_text += t('lb_global_row', lang,
+                                rank=rank_icon, name=user_link(entry['user_id'], name),
+                                marks=entry['total_marks'])
+            else:
+                g_text += t('lb_no_attempts_daily', lang)
+            global_text_cache[lang] = g_text
+        global_text = global_text_cache[lang]
 
         # Group leaderboard
         lb = db.get_group_leaderboard(bot_id, group_id)
@@ -1415,7 +1441,7 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
     app.add_handler(settings_conv)
     app.add_handler(CallbackQueryHandler(cb_open_settings, pattern=r"^open_settings:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_settings_back, pattern=r"^settings_back:\d+$"))
-    app.add_handler(CallbackQueryHandler(cb_set_language, pattern=r"^set_lang:\d+:(en|hi)$"))
+    app.add_handler(CallbackQueryHandler(cb_set_language, pattern=r"^set_lang:\d+:-?\d+:(en|hi)$"))
 
     # Poll handlers
     app.add_handler(MessageHandler(filters.POLL, receive_poll))
