@@ -23,6 +23,7 @@ from config import (
     MARKS_CORRECT, MARKS_WRONG, MARKS_NOT_ATTEMPTED,
     GLOBAL_LEADERBOARD_LIMIT, TIMEZONE
 )
+from lang import t
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +60,12 @@ async def check_force_join(bot_id: int, user_id: int, app: Application) -> bool:
     return False
 
 
-async def send_force_join_msg(update: Update, settings: dict):
+async def send_force_join_msg(update: Update, settings: dict, lang: str = 'en'):
     link = settings.get('force_join_link', '#')
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Join Channel / Group", url=link)],
+        [InlineKeyboardButton(t('force_join_btn', lang), url=link)],
     ])
-    text = (
-        "⛔ <b>Access Restricted!</b>\n\n"
-        "You must join our channel/group to use this bot.\n\n"
-        "👇 Click the button below to join, then try again."
-    )
+    text = f"{t('force_join_title', lang)}\n\n{t('force_join_body', lang)}"
     if update.message:
         await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
     elif update.callback_query:
@@ -76,15 +73,11 @@ async def send_force_join_msg(update: Update, settings: dict):
         await update.callback_query.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
-async def send_inactive_msg(update: Update):
+async def send_inactive_msg(update: Update, lang: str = 'en'):
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📩 Contact Owner", url=OWNER_CONTACT_LINK)],
+        [InlineKeyboardButton(t('inactive_btn', lang), url=OWNER_CONTACT_LINK)],
     ])
-    text = (
-        "🔴 <b>Bot is Not Active</b>\n\n"
-        "This bot is currently inactive.\n"
-        "Please contact the owner for help."
-    )
+    text = f"{t('inactive_title', lang)}\n\n{t('inactive_body', lang)}"
     if update.message:
         await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
     elif update.callback_query:
@@ -136,15 +129,16 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.upsert_bot_user(bot_id, user.id, user.username, user.first_name)
 
     # Check inactive
+    lang = db.get_bot_language(bot_id)
     if bot_info['status'] == 'inactive':
-        await send_inactive_msg(update)
+        await send_inactive_msg(update, lang)
         return
 
     # Check force join
     settings = db.get_bot_settings(bot_id)
     if settings and settings.get('force_join_chat_id'):
         if not await check_force_join(bot_id, user.id, ctx.application):
-            await send_force_join_msg(update, settings)
+            await send_force_join_msg(update, settings, lang)
             return
 
     welcome_text = (settings or {}).get('welcome_text', 'Welcome! 🎯 I am a Quiz Bot.')
@@ -559,6 +553,10 @@ async def _auto_distribute(app, bot_id: int, quiz_id: int, mgmt_gid: int,
     groups = db.get_bot_groups(bot_id)
     target_groups = [g for g in groups if g['group_id'] != mgmt_gid]
 
+    # Translate quiz if Hindi mode
+    lang = db.get_bot_language(bot_id)
+    question, options, explanation = await _translate_quiz(quiz, lang)
+
     success, fail = 0, 0
     start = asyncio.get_event_loop().time()
 
@@ -566,11 +564,11 @@ async def _auto_distribute(app, bot_id: int, quiz_id: int, mgmt_gid: int,
         try:
             sent = await app.bot.send_poll(
                 chat_id=grp['group_id'],
-                question=quiz['question'],
-                options=quiz['options'],
+                question=question,
+                options=options,
                 type='quiz',
                 correct_option_id=quiz['correct_option'],
-                explanation=quiz.get('explanation') or None,
+                explanation=explanation,
                 is_anonymous=False,
             )
             db.add_quiz_send(
@@ -661,6 +659,10 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Translate if Hindi mode
+    lang = db.get_bot_language(bot_id)
+    question, options, explanation = await _translate_quiz(quiz, lang)
+
     status_msg = await update.message.reply_text(
         f"⏳ Sending to {len(target_groups)} group(s)…"
     )
@@ -671,11 +673,11 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             sent = await ctx.application.bot.send_poll(
                 chat_id=grp['group_id'],
-                question=quiz['question'],
-                options=quiz['options'],
+                question=question,
+                options=options,
                 type='quiz',
                 correct_option_id=quiz['correct_option'],
-                explanation=quiz.get('explanation') or None,
+                explanation=explanation,
                 is_anonymous=False,
             )
             db.add_quiz_send(quiz['id'], grp['group_id'], sent.message_id,
@@ -693,6 +695,26 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Time: <b>{elapsed}s</b>",
         parse_mode=ParseMode.HTML
     )
+
+
+# ─── Quiz translation helper ─────────────────────────────────────────────────
+
+async def _translate_quiz(quiz: dict, target_lang: str) -> tuple:
+    """Translate quiz question, options, and explanation to target_lang.
+    Returns (question, options, explanation). Falls back to originals on error."""
+    if target_lang != 'hi':
+        return quiz['question'], quiz['options'], quiz.get('explanation') or None
+    try:
+        from deep_translator import GoogleTranslator
+        tr = GoogleTranslator(source='auto', target='hi')
+        question = tr.translate(quiz['question']) or quiz['question']
+        options = [tr.translate(opt) or opt for opt in quiz['options']]
+        exp = quiz.get('explanation') or ''
+        explanation = (tr.translate(exp) or exp) if exp else None
+        return question, options, explanation
+    except Exception as e:
+        logger.warning(f"Quiz translation failed: {e}")
+        return quiz['question'], quiz['options'], quiz.get('explanation') or None
 
 
 # ─── Poll answer handler ──────────────────────────────────────────────────────
@@ -859,6 +881,89 @@ async def cmd_adminhelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
+# ─── /language ───────────────────────────────────────────────────────────────
+
+def _language_keyboard(bot_id: int, lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(t('language_btn_en', lang), callback_data=f"set_lang:{bot_id}:en"),
+        InlineKeyboardButton(t('language_btn_hi', lang), callback_data=f"set_lang:{bot_id}:hi"),
+    ]])
+
+
+async def _check_language_permission(bot_id: int, user_id: int,
+                                     chat_type: str, chat_id: int,
+                                     app_bot) -> bool:
+    """Returns True if user may change language (subowner / main admin / group admin)."""
+    if is_subowner(bot_id, user_id) or is_main_admin(user_id):
+        return True
+    if chat_type in ('group', 'supergroup'):
+        try:
+            member = await app_bot.get_chat_member(chat_id, user_id)
+            return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
+        except Exception:
+            return False
+    return False
+
+
+async def cmd_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    bot_id = get_bot_id_from_app(ctx.application)
+    user = update.effective_user
+    chat = update.effective_chat
+    lang = db.get_bot_language(bot_id)
+
+    allowed = await _check_language_permission(
+        bot_id, user.id, chat.type, chat.id, ctx.application.bot
+    )
+    if not allowed:
+        await update.message.reply_text(t('language_no_permission', lang), parse_mode=ParseMode.HTML)
+        return
+
+    current_key = 'language_current_hi' if lang == 'hi' else 'language_current_en'
+    text = (
+        f"{t('language_title', lang)}\n\n"
+        f"{t('language_body', lang)}\n\n"
+        f"{t(current_key, lang)}"
+    )
+    await update.message.reply_text(
+        text,
+        reply_markup=_language_keyboard(bot_id, lang),
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def cb_set_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")           # set_lang:bot_id:lang_code
+    bot_id = int(parts[1])
+    new_lang = parts[2]
+    user = update.effective_user
+    chat = update.effective_chat
+
+    allowed = await _check_language_permission(
+        bot_id, user.id, chat.type, chat.id, ctx.application.bot
+    )
+    if not allowed:
+        await query.answer(t('language_no_permission', new_lang), show_alert=True)
+        return
+
+    db.set_bot_language(bot_id, new_lang)
+
+    msg_key = 'language_set_hi' if new_lang == 'hi' else 'language_set_en'
+    current_key = 'language_current_hi' if new_lang == 'hi' else 'language_current_en'
+    text = (
+        f"{t('language_title', new_lang)}\n\n"
+        f"{t('language_body', new_lang)}\n\n"
+        f"{t(current_key, new_lang)}\n\n"
+        f"{t(msg_key, new_lang)}"
+    )
+    await query.edit_message_text(
+        text,
+        reply_markup=_language_keyboard(bot_id, new_lang),
+        parse_mode=ParseMode.HTML
+    )
+
+
 # ─── Group tracking ───────────────────────────────────────────────────────────
 
 async def chat_member_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -872,12 +977,11 @@ async def chat_member_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
         db.upsert_bot_group(bot_id, chat.id, chat.title, chat.username or "", chat.type)
         if chat.type in ('group', 'supergroup'):
+            lang = db.get_bot_language(bot_id)
             try:
                 await ctx.application.bot.send_message(
                     chat.id,
-                    "👋 <b>Thanks for adding me!</b>\n\n"
-                    "I'm a Quiz Bot. The bot owner will send quizzes here automatically. "
-                    "Use /leaderboard to see rankings!",
+                    t('group_added', lang),
                     parse_mode=ParseMode.HTML
                 )
             except Exception:
@@ -891,60 +995,55 @@ async def chat_member_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
     bot_info = db.get_bot_by_id(bot_id)
+    lang = db.get_bot_language(bot_id)
     if bot_info and bot_info['status'] == 'inactive':
-        await send_inactive_msg(update)
+        await send_inactive_msg(update, lang)
         return
     # Check force join
     settings = db.get_bot_settings(bot_id)
     if settings and settings.get('force_join_chat_id'):
         if not await check_force_join(bot_id, update.effective_user.id, ctx.application):
-            await send_force_join_msg(update, settings)
+            await send_force_join_msg(update, settings, lang)
             return
+
+    medals = ["🥇", "🥈", "🥉"]
+    ist = pytz.timezone(TIMEZONE)
+    date_str = datetime.now(ist).strftime("%d %B %Y")
 
     if update.effective_chat.type in ('group', 'supergroup'):
         group_id = update.effective_chat.id
         group_name = update.effective_chat.title
         lb = db.get_group_leaderboard(bot_id, group_id)
         if not lb:
-            await update.message.reply_text("📊 No quiz attempts yet in this group!")
+            await update.message.reply_text(t('lb_no_attempts', lang))
             return
 
-        chat_link = f"<a href='https://t.me/{update.effective_chat.username}'>{group_name}</a>" if update.effective_chat.username else group_name
-        ist = pytz.timezone(TIMEZONE)
-        date_str = datetime.now(ist).strftime("%d %B %Y")
-
-        text = f"🏆 <b>Leaderboard — {chat_link}</b>\n"
-        text += f"📅 <i>{date_str}</i>\n"
+        chat_link = (f"<a href='https://t.me/{update.effective_chat.username}'>{group_name}</a>"
+                     if update.effective_chat.username else group_name)
+        text = t('lb_group_header', lang, chat_link=chat_link, date=date_str)
         text += "━" * 28 + "\n\n"
-
-        medals = ["🥇", "🥈", "🥉"]
         for i, entry in enumerate(lb[:20]):
             rank_icon = medals[i] if i < 3 else f"#{i+1}"
             name = entry.get('first_name') or "User"
-            name_link = user_link(entry['user_id'], name)
-            text += (
-                f"{rank_icon} {name_link}\n"
-                f"   ✅ {entry['correct']} correct | ❌ {entry['wrong']} wrong | "
-                f"📝 {entry['total_attempts']} attempted | 🏅 {entry['total_marks']} pts\n\n"
-            )
+            text += t('lb_row', lang,
+                      rank=rank_icon, name=user_link(entry['user_id'], name),
+                      correct=entry['correct'], wrong=entry['wrong'],
+                      attempted=entry['total_attempts'], marks=entry['total_marks'])
         await update.message.reply_text(text, parse_mode=ParseMode.HTML,
                                         disable_web_page_preview=True)
     else:
-        # Private chat — show global
         lb = db.get_global_leaderboard(bot_id, limit=GLOBAL_LEADERBOARD_LIMIT)
         if not lb:
-            await update.message.reply_text("📊 No quiz attempts yet!")
+            await update.message.reply_text(t('lb_no_attempts_global', lang))
             return
-        ist = pytz.timezone(TIMEZONE)
-        date_str = datetime.now(ist).strftime("%d %B %Y")
-        text = f"🌍 <b>Global Leaderboard (Top {GLOBAL_LEADERBOARD_LIMIT})</b>\n"
-        text += f"📅 <i>{date_str}</i>\n"
+        text = t('lb_global_header', lang, limit=GLOBAL_LEADERBOARD_LIMIT, date=date_str)
         text += "━" * 28 + "\n\n"
-        medals = ["🥇", "🥈", "🥉"]
         for i, entry in enumerate(lb):
             rank_icon = medals[i] if i < 3 else f"#{i+1}"
             name = entry.get('first_name') or "User"
-            text += f"{rank_icon} {user_link(entry['user_id'], name)} — 🏅 {entry['total_marks']} pts\n"
+            text += t('lb_global_row', lang,
+                      rank=rank_icon, name=user_link(entry['user_id'], name),
+                      marks=entry['total_marks'])
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
@@ -953,13 +1052,14 @@ async def cmd_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_myrank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
     bot_info = db.get_bot_by_id(bot_id)
+    lang = db.get_bot_language(bot_id)
     if bot_info and bot_info['status'] == 'inactive':
-        await send_inactive_msg(update)
+        await send_inactive_msg(update, lang)
         return
     settings = db.get_bot_settings(bot_id)
     if settings and settings.get('force_join_chat_id'):
         if not await check_force_join(bot_id, update.effective_user.id, ctx.application):
-            await send_force_join_msg(update, settings)
+            await send_force_join_msg(update, settings, lang)
             return
 
     user = update.effective_user
@@ -968,40 +1068,44 @@ async def cmd_myrank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ('group', 'supergroup'):
         group_rank = db.get_user_rank_in_group(bot_id, user.id, update.effective_chat.id)
         text = (
-            f"📊 <b>Your Rankings</b>\n\n"
-            f"👤 {user_link(user.id, user.first_name)}\n\n"
-            f"🏘️ <b>In {update.effective_chat.title}:</b>\n"
+            t('myrank_header', lang)
+            + f"👤 {user_link(user.id, user.first_name)}\n\n"
+            + t('myrank_group_section', lang, group=update.effective_chat.title)
         )
         if group_rank:
             text += (
-                f"  🏆 Rank: #{group_rank['rank']} out of {group_rank['total_users']}\n"
-                f"  ✅ Correct: {group_rank.get('correct', 0)}\n"
-                f"  ❌ Wrong: {group_rank.get('wrong', 0)}\n"
-                f"  📝 Attempted: {group_rank.get('total_attempts', 0)}\n"
-                f"  🏅 Total Marks: {group_rank.get('total_marks', 0)}\n\n"
+                t('myrank_rank', lang, rank=group_rank['rank'], total=group_rank['total_users'])
+                + t('myrank_correct', lang, n=group_rank.get('correct', 0))
+                + t('myrank_wrong', lang, n=group_rank.get('wrong', 0))
+                + t('myrank_attempted', lang, n=group_rank.get('total_attempts', 0))
+                + t('myrank_marks', lang, n=group_rank.get('total_marks', 0))
+                + "\n"
             )
         else:
-            text += "  No attempts yet in this group.\n\n"
-        text += "🌍 <b>Global:</b>\n"
+            text += t('myrank_no_group', lang)
+        text += t('myrank_global_section', lang)
         if global_rank:
             text += (
-                f"  🏆 Rank: #{global_rank['rank']} out of {global_rank['total_users']}\n"
-                f"  🏅 Total Marks: {global_rank.get('total_marks', 0)}\n"
+                t('myrank_rank', lang, rank=global_rank['rank'], total=global_rank['total_users'])
+                + t('myrank_marks', lang, n=global_rank.get('total_marks', 0))
             )
         else:
-            text += "  No global attempts yet.\n"
+            text += t('myrank_no_global', lang)
     else:
-        text = f"🌍 <b>Your Global Rank</b>\n\n👤 {user_link(user.id, user.first_name)}\n\n"
+        text = (
+            t('myrank_global_header', lang)
+            + f"👤 {user_link(user.id, user.first_name)}\n\n"
+        )
         if global_rank:
             text += (
-                f"🏆 Rank: #{global_rank['rank']} out of {global_rank['total_users']}\n"
-                f"✅ Correct: {global_rank.get('correct', 0)}\n"
-                f"❌ Wrong: {global_rank.get('wrong', 0)}\n"
-                f"📝 Attempted: {global_rank.get('total_attempts', 0)}\n"
-                f"🏅 Total Marks: {global_rank.get('total_marks', 0)}\n"
+                t('myrank_rank', lang, rank=global_rank['rank'], total=global_rank['total_users'])
+                + t('myrank_correct', lang, n=global_rank.get('correct', 0))
+                + t('myrank_wrong', lang, n=global_rank.get('wrong', 0))
+                + t('myrank_attempted', lang, n=global_rank.get('total_attempts', 0))
+                + t('myrank_marks', lang, n=global_rank.get('total_marks', 0))
             )
         else:
-            text += "You haven't attempted any quizzes yet!"
+            text += t('myrank_no_attempts', lang)
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -1176,18 +1280,21 @@ async def send_daily_leaderboards(ctx: ContextTypes.DEFAULT_TYPE):
     date_str = datetime.now(ist).strftime("%d %B %Y")
     medals = ["🥇", "🥈", "🥉"]
 
+    lang = db.get_bot_language(bot_id)
+
     # Global leaderboard
     global_lb = db.get_global_leaderboard(bot_id, limit=GLOBAL_LEADERBOARD_LIMIT)
-    global_text = f"🌍 <b>Global Leaderboard — Top {GLOBAL_LEADERBOARD_LIMIT}</b>\n"
-    global_text += f"📅 <i>{date_str}</i>\n"
+    global_text = t('lb_daily_global_header', lang, limit=GLOBAL_LEADERBOARD_LIMIT, date=date_str)
     global_text += "━" * 30 + "\n\n"
     if global_lb:
         for i, entry in enumerate(global_lb):
             rank_icon = medals[i] if i < 3 else f"#{i+1}"
             name = entry.get('first_name') or "User"
-            global_text += f"{rank_icon} {user_link(entry['user_id'], name)} — 🏅 {entry['total_marks']} pts\n"
+            global_text += t('lb_global_row', lang,
+                              rank=rank_icon, name=user_link(entry['user_id'], name),
+                              marks=entry['total_marks'])
     else:
-        global_text += "No attempts yet!"
+        global_text += t('lb_no_attempts_daily', lang)
 
     for grp in groups:
         group_id = grp['group_id']
@@ -1203,16 +1310,15 @@ async def send_daily_leaderboards(ctx: ContextTypes.DEFAULT_TYPE):
         if lb:
             chat_link = (f"<a href='https://t.me/{group_username}'>{group_name}</a>"
                          if group_username else group_name)
-            text = f"🏆 <b>Daily Leaderboard — {chat_link}</b>\n"
-            text += f"📅 <i>{date_str}</i>\n"
+            text = t('lb_daily_group_header', lang, chat_link=chat_link, date=date_str)
             text += "━" * 30 + "\n\n"
             for i, entry in enumerate(lb[:20]):
                 rank_icon = medals[i] if i < 3 else f"#{i+1}"
                 name = entry.get('first_name') or "User"
-                text += (
-                    f"{rank_icon} {user_link(entry['user_id'], name)} | "
-                    f"✅{entry['correct']} ❌{entry['wrong']} 🏅{entry['total_marks']}pts\n"
-                )
+                text += t('lb_row_compact', lang,
+                          rank=rank_icon, name=user_link(entry['user_id'], name),
+                          correct=entry['correct'], wrong=entry['wrong'],
+                          marks=entry['total_marks'])
             try:
                 await ctx.application.bot.send_message(
                     group_id, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
@@ -1289,6 +1395,7 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("adminhelp", cmd_adminhelp))
+    app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("setmgmt", cmd_setmgmt))
     app.add_handler(CommandHandler("send", cmd_send))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
@@ -1308,6 +1415,7 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
     app.add_handler(settings_conv)
     app.add_handler(CallbackQueryHandler(cb_open_settings, pattern=r"^open_settings:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_settings_back, pattern=r"^settings_back:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_set_language, pattern=r"^set_lang:\d+:(en|hi)$"))
 
     # Poll handlers
     app.add_handler(MessageHandler(filters.POLL, receive_poll))

@@ -70,6 +70,7 @@ def init_db():
         meet_owner_link               TEXT,
         force_join_link               TEXT,
         force_join_chat_id            INTEGER,
+        language                      TEXT DEFAULT 'en',
         FOREIGN KEY (bot_id) REFERENCES bots(id)
     );
 
@@ -112,7 +113,8 @@ def init_db():
 
     # ── Migrations: add columns that may be missing in older DBs ──────────────
     migrations = [
-        ("quizzes", "confirmation_msg_id", "INTEGER DEFAULT 0"),
+        ("quizzes",       "confirmation_msg_id", "INTEGER DEFAULT 0"),
+        ("bot_settings",  "language",            "TEXT DEFAULT 'en'"),
     ]
     for table, column, col_def in migrations:
         existing = [
@@ -256,6 +258,28 @@ def update_bot_settings(bot_id: int, **kwargs):
     vals = list(kwargs.values()) + [bot_id]
     conn = get_conn()
     conn.execute(f"UPDATE bot_settings SET {cols} WHERE bot_id=?", vals)
+    conn.commit()
+    conn.close()
+
+
+def get_bot_language(bot_id: int) -> str:
+    """Return the language code for a bot ('en' or 'hi'). Defaults to 'en'."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT language FROM bot_settings WHERE bot_id=?", (bot_id,)
+    ).fetchone()
+    conn.close()
+    if row and row[0]:
+        return row[0]
+    return 'en'
+
+
+def set_bot_language(bot_id: int, language: str):
+    """Set the language for a bot ('en' or 'hi')."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE bot_settings SET language=? WHERE bot_id=?", (language, bot_id)
+    )
     conn.commit()
     conn.close()
 
