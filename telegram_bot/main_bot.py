@@ -12,7 +12,7 @@ from telegram.ext import (
     MessageHandler, ConversationHandler, ContextTypes, filters
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter, Forbidden, BadRequest
 
 import database as db
 from config import ADMIN_ID, OWNER_CONTACT_LINK, OWNER_USERNAME
@@ -478,25 +478,45 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Reply to a message with /broadcast to send it to all users and connected bots.")
         return
-    users = db.get_all_users()
-    bots = db.get_all_active_bots()
+    msg = update.message.reply_to_message
+    # Collect unique user IDs across main-bot users + all subbot users
+    seen: set = set()
+    user_ids = []
+    for u in db.get_all_users():
+        if u['user_id'] not in seen:
+            seen.add(u['user_id'])
+            user_ids.append(u['user_id'])
+    for b in db.get_all_active_bots():
+        for bu in db.get_bot_users(b['id']):
+            if bu['user_id'] not in seen:
+                seen.add(bu['user_id'])
+                user_ids.append(bu['user_id'])
+
+    status = await update.message.reply_text(f"📢 Broadcasting to {len(user_ids)} users…")
     ok, fail = 0, 0
-    for u in users:
+    for uid in user_ids:
         try:
-            await update.message.reply_to_message.copy(chat_id=u['user_id'])
+            await ctx.application.bot.copy_message(
+                chat_id=uid,
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
             ok += 1
-        except Exception:
-            fail += 1
-    # Also send to all subbot users
-    for b in bots:
-        bot_users = db.get_bot_users(b['id'])
-        for bu in bot_users:
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
             try:
-                await update.message.reply_to_message.copy(chat_id=bu['user_id'])
+                await ctx.application.bot.copy_message(
+                    chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
                 ok += 1
             except Exception:
                 fail += 1
-    await update.message.reply_text(f"📢 Broadcast complete!\n✅ Sent: {ok}\n❌ Failed: {fail}")
+        except (Forbidden, BadRequest):
+            fail += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)  # gentle rate-limit
+
+    await status.edit_text(f"📢 Broadcast complete!\n✅ Sent: {ok}\n❌ Failed: {fail}")
 
 
 async def cmd_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -505,24 +525,45 @@ async def cmd_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Reply to a message with /forward to forward it.")
         return
-    users = db.get_all_users()
-    bots = db.get_all_active_bots()
+    msg = update.message.reply_to_message
+    # Collect unique user IDs across main-bot users + all subbot users
+    seen: set = set()
+    user_ids = []
+    for u in db.get_all_users():
+        if u['user_id'] not in seen:
+            seen.add(u['user_id'])
+            user_ids.append(u['user_id'])
+    for b in db.get_all_active_bots():
+        for bu in db.get_bot_users(b['id']):
+            if bu['user_id'] not in seen:
+                seen.add(bu['user_id'])
+                user_ids.append(bu['user_id'])
+
+    status = await update.message.reply_text(f"📤 Forwarding to {len(user_ids)} users…")
     ok, fail = 0, 0
-    for u in users:
+    for uid in user_ids:
         try:
-            await update.message.reply_to_message.forward(chat_id=u['user_id'])
+            await ctx.application.bot.forward_message(
+                chat_id=uid,
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
             ok += 1
-        except Exception:
-            fail += 1
-    for b in bots:
-        bot_users = db.get_bot_users(b['id'])
-        for bu in bot_users:
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
             try:
-                await update.message.reply_to_message.forward(chat_id=bu['user_id'])
+                await ctx.application.bot.forward_message(
+                    chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
                 ok += 1
             except Exception:
                 fail += 1
-    await update.message.reply_text(f"📤 Forward complete!\n✅ Sent: {ok}\n❌ Failed: {fail}")
+        except (Forbidden, BadRequest):
+            fail += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+
+    await status.edit_text(f"📤 Forward complete!\n✅ Sent: {ok}\n❌ Failed: {fail}")
 
 
 async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -530,54 +571,120 @@ async def cmd_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     args = ctx.args
     if not args:
-        await update.message.reply_text("Usage: /info @username or /info user_id")
+        await update.message.reply_text(
+            "Usage:\n"
+            "  /info @botusername  — look up a subbot\n"
+            "  /info @username     — look up a user\n"
+            "  /info user_id       — look up by numeric ID"
+        )
         return
     query_str = args[0].lstrip("@")
-    conn = __import__('database').get_conn()
-    # Try as bot username
-    bot_row = conn.execute(
-        "SELECT * FROM bots WHERE bot_username=? AND status!='deleted'", (query_str,)
-    ).fetchone()
-    if bot_row:
-        bot = dict(bot_row)
-        owner = conn.execute("SELECT * FROM users WHERE user_id=?", (bot['owner_id'],)).fetchone()
+
+    # ── Try as bot username ──────────────────────────────────────────────────
+    bot_info = db.get_bot_by_username(query_str) if hasattr(db, 'get_bot_by_username') else None
+    if bot_info is None:
+        # Fallback: direct query
+        conn = db.get_conn()
+        row = conn.execute(
+            "SELECT * FROM bots WHERE bot_username=? AND status!='deleted'", (query_str,)
+        ).fetchone()
         conn.close()
-        owner_info = dict(owner) if owner else {}
+        bot_info = dict(row) if row else None
+
+    if bot_info:
+        # Fetch owner info
+        conn = db.get_conn()
+        owner_row = conn.execute(
+            "SELECT * FROM users WHERE user_id=?", (bot_info['owner_id'],)
+        ).fetchone()
+        conn.close()
+        owner = dict(owner_row) if owner_row else {}
+        user_bots = db.get_bots_by_owner(bot_info['owner_id'])
         await update.message.reply_text(
             f"🤖 <b>Bot Info</b>\n\n"
-            f"Name: {bot['bot_name']}\n"
-            f"Username: @{bot['bot_username']}\n"
-            f"Status: {bot['status']}\n\n"
+            f"Name: <b>{bot_info['bot_name']}</b>\n"
+            f"Username: @{bot_info['bot_username']}\n"
+            f"Status: <code>{bot_info['status']}</code>\n"
+            f"ID: <code>{bot_info['id']}</code>\n\n"
             f"👤 <b>Owner:</b>\n"
-            f"Name: {owner_info.get('first_name', 'N/A')}\n"
-            f"ID: <code>{owner_info.get('user_id', 'N/A')}</code>\n"
-            f"Username: @{owner_info.get('username', 'N/A')}",
+            f"Name: {owner.get('first_name', 'N/A')}\n"
+            f"ID: <code>{owner.get('user_id', 'N/A')}</code>\n"
+            f"Username: @{owner.get('username', 'N/A')}\n"
+            f"Total bots: {len(user_bots)}",
             parse_mode=ParseMode.HTML
         )
         return
-    # Try as user
+
+    # ── Try as user (numeric ID or username) ────────────────────────────────
+    conn = db.get_conn()
     try:
         uid = int(query_str)
         user_row = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     except ValueError:
         user_row = conn.execute("SELECT * FROM users WHERE username=?", (query_str,)).fetchone()
     conn.close()
+
     if user_row:
         u = dict(user_row)
         user_bots = db.get_bots_by_owner(u['user_id'])
-        bots_text = ""
-        for b in user_bots:
-            bots_text += f"  • {b['bot_name']} (@{b['bot_username']}) [{b['status']}]\n"
+        bots_text = "".join(
+            f"  • {b['bot_name']} (@{b['bot_username']}) [{b['status']}]\n"
+            for b in user_bots
+        )
         await update.message.reply_text(
             f"👤 <b>User Info</b>\n\n"
-            f"Name: {u['first_name']}\n"
+            f"Name: {u.get('first_name', 'N/A')}\n"
             f"ID: <code>{u['user_id']}</code>\n"
             f"Username: @{u.get('username', 'N/A')}\n\n"
             f"🤖 <b>Bots Created ({len(user_bots)}):</b>\n{bots_text or 'None'}",
             parse_mode=ParseMode.HTML
         )
         return
+
     await update.message.reply_text("❌ No bot or user found with that username/ID.")
+
+
+async def _send_content(bot, chat_id: int, msg) -> bool:
+    """Send message content to chat_id using the given bot (works cross-token)."""
+    try:
+        if msg.text:
+            await bot.send_message(chat_id=chat_id, text=msg.text,
+                                   entities=msg.entities or None)
+        elif msg.photo:
+            await bot.send_photo(chat_id=chat_id, photo=msg.photo[-1].file_id,
+                                 caption=msg.caption, caption_entities=msg.caption_entities or None)
+        elif msg.video:
+            await bot.send_video(chat_id=chat_id, video=msg.video.file_id,
+                                 caption=msg.caption, caption_entities=msg.caption_entities or None)
+        elif msg.document:
+            await bot.send_document(chat_id=chat_id, document=msg.document.file_id,
+                                    caption=msg.caption, caption_entities=msg.caption_entities or None)
+        elif msg.audio:
+            await bot.send_audio(chat_id=chat_id, audio=msg.audio.file_id,
+                                 caption=msg.caption, caption_entities=msg.caption_entities or None)
+        elif msg.sticker:
+            await bot.send_sticker(chat_id=chat_id, sticker=msg.sticker.file_id)
+        elif msg.voice:
+            await bot.send_voice(chat_id=chat_id, voice=msg.voice.file_id,
+                                 caption=msg.caption)
+        elif msg.video_note:
+            await bot.send_video_note(chat_id=chat_id, video_note=msg.video_note.file_id)
+        elif msg.animation:
+            await bot.send_animation(chat_id=chat_id, animation=msg.animation.file_id,
+                                     caption=msg.caption)
+        else:
+            return False
+        return True
+    except RetryAfter as e:
+        await asyncio.sleep(e.retry_after + 1)
+        try:
+            return await _send_content(bot, chat_id, msg)
+        except Exception:
+            return False
+    except (Forbidden, BadRequest):
+        return False
+    except Exception:
+        return False
 
 
 async def cmd_globalforward(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -587,40 +694,62 @@ async def cmd_globalforward(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Reply to a message with /Globalforward.")
         return
-    # Forward to all main-bot users
-    users = db.get_all_users()
-    ok, fail = 0, 0
-    for u in users:
-        try:
-            await update.message.reply_to_message.forward(chat_id=u['user_id'])
-            ok += 1
-        except Exception:
-            fail += 1
-    # Forward to all subbot users + their groups via each subbot's application
-    bots = db.get_all_active_bots()
-    for b in bots:
-        bot_users = db.get_bot_users(b['id'])
-        bot_groups = db.get_bot_groups(b['id'])
+    msg = update.message.reply_to_message
+    main_bot = ctx.application.bot
+
+    # Collect unique recipients: {user_id: bot_to_use}
+    # Main-bot users → send via main bot
+    seen_users: set = set()
+    main_user_ids = []
+    for u in db.get_all_users():
+        if u['user_id'] not in seen_users:
+            seen_users.add(u['user_id'])
+            main_user_ids.append(u['user_id'])
+
+    # Subbot users/groups → send via each subbot's loop (cross-loop safe)
+    subbot_tasks = []  # list of (loop, bot, chat_id)
+    for b in db.get_all_active_bots():
         app = bot_manager.get_app(b['id'])
-        if not app:
+        loop = bot_manager.get_loop(b['id'])
+        if not app or not loop or loop.is_closed():
             continue
-        for bu in bot_users:
-            try:
-                await app.bot.forward_message(chat_id=bu['user_id'],
-                                              from_chat_id=update.message.reply_to_message.chat_id,
-                                              message_id=update.message.reply_to_message.message_id)
+        for bu in db.get_bot_users(b['id']):
+            if bu['user_id'] not in seen_users:
+                seen_users.add(bu['user_id'])
+                subbot_tasks.append((loop, app.bot, bu['user_id']))
+        settings = db.get_bot_settings(b['id'])
+        mgmt_gid = (settings or {}).get('quiz_management_group_id')
+        for g in db.get_bot_groups(b['id']):
+            if g['group_id'] != mgmt_gid:
+                subbot_tasks.append((loop, app.bot, g['group_id']))
+
+    total = len(main_user_ids) + len(subbot_tasks)
+    status = await update.message.reply_text(f"🌐 Global Forward: sending to {total} recipients…")
+    ok, fail = 0, 0
+
+    # Send via main bot to main-bot users
+    for uid in main_user_ids:
+        if await _send_content(main_bot, uid, msg):
+            ok += 1
+        else:
+            fail += 1
+        await asyncio.sleep(0.05)
+
+    # Send via subbots using run_coroutine_threadsafe → wrap_future
+    futures = []
+    for (loop, sbot, chat_id) in subbot_tasks:
+        cf = asyncio.run_coroutine_threadsafe(_send_content(sbot, chat_id, msg), loop)
+        futures.append(asyncio.wrap_future(cf))
+
+    if futures:
+        results = await asyncio.gather(*futures, return_exceptions=True)
+        for r in results:
+            if r is True:
                 ok += 1
-            except Exception:
+            else:
                 fail += 1
-        for g in bot_groups:
-            try:
-                await app.bot.forward_message(chat_id=g['group_id'],
-                                              from_chat_id=update.message.reply_to_message.chat_id,
-                                              message_id=update.message.reply_to_message.message_id)
-                ok += 1
-            except Exception:
-                fail += 1
-    await update.message.reply_text(f"🌐 Global Forward complete!\n✅ Sent: {ok}\n❌ Failed: {fail}")
+
+    await status.edit_text(f"🌐 Global Forward complete!\n✅ Sent: {ok}\n❌ Failed: {fail}")
 
 
 # ─── Build application ────────────────────────────────────────────────────────

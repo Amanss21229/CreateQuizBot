@@ -24,6 +24,13 @@ def get_app(bot_id: int) -> Optional[Application]:
         return entry['app'] if entry else None
 
 
+def get_loop(bot_id: int):
+    """Return the asyncio event loop for a running subbot, or None."""
+    with _lock:
+        entry = _registry.get(bot_id)
+        return entry['loop'] if entry else None
+
+
 def _run_subbot(bot_id: int, token: str):
     """Thread target: creates its own event loop and runs the subbot."""
     loop = asyncio.new_event_loop()

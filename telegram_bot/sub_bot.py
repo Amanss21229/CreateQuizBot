@@ -15,7 +15,7 @@ from telegram.ext import (
     PollAnswerHandler, ChatMemberHandler, filters
 )
 from telegram.constants import ParseMode, ChatMemberStatus
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter, Forbidden, BadRequest
 
 import database as db
 from config import (
@@ -1170,50 +1170,113 @@ async def cmd_broadcast_sub(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
     if not is_subowner(bot_id, update.effective_user.id):
         return
+    if update.effective_chat.type != 'private':
+        await update.message.reply_text("⚠️ /broadcast can only be used in private chat with the bot.")
+        return
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Reply to a message with /broadcast to send it to all users and groups.")
         return
+    msg = update.message.reply_to_message
     users = db.get_bot_users(bot_id)
     groups = db.get_bot_groups(bot_id)
+    total = len(users) + len(groups)
+    status = await update.message.reply_text(f"📢 Broadcasting to {len(users)} users + {len(groups)} groups…")
     ok, fail = 0, 0
     for u in users:
         try:
-            await update.message.reply_to_message.copy(chat_id=u['user_id'])
+            await ctx.application.bot.copy_message(
+                chat_id=u['user_id'],
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
             ok += 1
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await ctx.application.bot.copy_message(
+                    chat_id=u['user_id'], from_chat_id=msg.chat_id, message_id=msg.message_id)
+                ok += 1
+            except Exception:
+                fail += 1
         except Exception:
             fail += 1
+        await asyncio.sleep(0.05)
     for g in groups:
         try:
-            await update.message.reply_to_message.copy(chat_id=g['group_id'])
+            await ctx.application.bot.copy_message(
+                chat_id=g['group_id'],
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
             ok += 1
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await ctx.application.bot.copy_message(
+                    chat_id=g['group_id'], from_chat_id=msg.chat_id, message_id=msg.message_id)
+                ok += 1
+            except Exception:
+                fail += 1
         except Exception:
             fail += 1
-    await update.message.reply_text(f"📢 Broadcast done!\n✅ Sent: {ok}\n❌ Failed: {fail}")
+        await asyncio.sleep(0.05)
+    await status.edit_text(f"📢 Broadcast done!\n✅ Sent: {ok}\n❌ Failed: {fail}")
 
 
 async def cmd_forward_sub(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
     if not is_subowner(bot_id, update.effective_user.id):
         return
+    if update.effective_chat.type != 'private':
+        await update.message.reply_text("⚠️ /forward can only be used in private chat with the bot.")
+        return
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Reply to a message with /forward.")
         return
+    msg = update.message.reply_to_message
     users = db.get_bot_users(bot_id)
     groups = db.get_bot_groups(bot_id)
+    status = await update.message.reply_text(f"📤 Forwarding to {len(users)} users + {len(groups)} groups…")
     ok, fail = 0, 0
     for u in users:
         try:
-            await update.message.reply_to_message.forward(chat_id=u['user_id'])
+            await ctx.application.bot.forward_message(
+                chat_id=u['user_id'],
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
             ok += 1
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await ctx.application.bot.forward_message(
+                    chat_id=u['user_id'], from_chat_id=msg.chat_id, message_id=msg.message_id)
+                ok += 1
+            except Exception:
+                fail += 1
         except Exception:
             fail += 1
+        await asyncio.sleep(0.05)
     for g in groups:
         try:
-            await update.message.reply_to_message.forward(chat_id=g['group_id'])
+            await ctx.application.bot.forward_message(
+                chat_id=g['group_id'],
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
             ok += 1
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await ctx.application.bot.forward_message(
+                    chat_id=g['group_id'], from_chat_id=msg.chat_id, message_id=msg.message_id)
+                ok += 1
+            except Exception:
+                fail += 1
         except Exception:
             fail += 1
-    await update.message.reply_text(f"📤 Forward done!\n✅ Sent: {ok}\n❌ Failed: {fail}")
+        await asyncio.sleep(0.05)
+    await status.edit_text(f"📤 Forward done!\n✅ Sent: {ok}\n❌ Failed: {fail}")
 
 
 async def cmd_fjoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
