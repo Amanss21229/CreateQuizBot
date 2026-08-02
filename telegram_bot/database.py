@@ -75,6 +75,16 @@ def init_db():
         FOREIGN KEY (bot_id) REFERENCES bots(id)
     );
 
+    CREATE TABLE IF NOT EXISTS bot_force_joins (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id  INTEGER NOT NULL,
+        chat_id INTEGER NOT NULL,
+        link    TEXT NOT NULL,
+        title   TEXT,
+        UNIQUE(bot_id, chat_id),
+        FOREIGN KEY (bot_id) REFERENCES bots(id)
+    );
+
     CREATE TABLE IF NOT EXISTS quizzes (
         id                           INTEGER PRIMARY KEY AUTOINCREMENT,
         bot_id                       INTEGER NOT NULL,
@@ -282,6 +292,63 @@ def set_bot_language(bot_id: int, language: str):
     conn.execute(
         "UPDATE bot_settings SET language=? WHERE bot_id=?", (language, bot_id)
     )
+    conn.commit()
+    conn.close()
+    # Migrate any legacy single force-join entries to the new table
+    migrate_legacy_force_joins()
+
+
+# ─── Force-join helpers ───────────────────────────────────────────────────────
+
+def get_force_joins(bot_id: int) -> list:
+    """Return all force-join entries for a bot (up to 5)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT chat_id, link, title FROM bot_force_joins WHERE bot_id=? ORDER BY id",
+        (bot_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_force_join(bot_id: int, chat_id: int, link: str, title: str = ""):
+    """Add a force-join channel (UPSERT). Caller must check count < 5 first."""
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO bot_force_joins(bot_id, chat_id, link, title) VALUES(?,?,?,?) "
+        "ON CONFLICT(bot_id, chat_id) DO UPDATE SET link=excluded.link, title=excluded.title",
+        (bot_id, chat_id, link, title or "")
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_all_force_joins(bot_id: int):
+    """Remove all force-join entries for a bot."""
+    conn = get_conn()
+    conn.execute("DELETE FROM bot_force_joins WHERE bot_id=?", (bot_id,))
+    conn.commit()
+    conn.close()
+
+
+def migrate_legacy_force_joins():
+    """One-time migration: copy old single force_join from bot_settings → bot_force_joins."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT bot_id, force_join_link, force_join_chat_id FROM bot_settings "
+        "WHERE force_join_link IS NOT NULL AND force_join_chat_id IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        # Only insert if not already in new table
+        existing = conn.execute(
+            "SELECT id FROM bot_force_joins WHERE bot_id=? AND chat_id=?",
+            (row['bot_id'], row['force_join_chat_id'])
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO bot_force_joins(bot_id, chat_id, link, title) VALUES(?,?,?,?)",
+                (row['bot_id'], row['force_join_chat_id'], row['force_join_link'], "Channel")
+            )
     conn.commit()
     conn.close()
 

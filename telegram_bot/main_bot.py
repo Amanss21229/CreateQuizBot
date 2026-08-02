@@ -329,8 +329,10 @@ async def cb_bot_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     groups_text = ""
     for g in full.get('groups', [])[:10]:
-        uname = f"@{g['group_username']}" if g['group_username'] else "Private"
-        groups_text += f"  • {g['group_name']} ({uname})\n"
+        if g.get('group_username'):
+            groups_text += f"  • <a href='https://t.me/{g['group_username']}'>{g['group_name']}</a>\n"
+        else:
+            groups_text += f"  • {g['group_name']} (Private)\n"
     if len(full.get('groups', [])) > 10:
         groups_text += f"  ... and {len(full['groups']) - 10} more\n"
     if not groups_text:

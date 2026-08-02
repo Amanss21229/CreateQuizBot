@@ -45,26 +45,30 @@ def get_bot_id_from_app(app: Application) -> int:
 
 
 async def check_force_join(bot_id: int, user_id: int, app: Application) -> bool:
-    """Returns True if user is allowed (no force join or already joined)."""
-    settings = db.get_bot_settings(bot_id)
-    if not settings or not settings.get('force_join_chat_id'):
+    """Returns True if user has joined ALL required channels/groups."""
+    force_joins = db.get_force_joins(bot_id)
+    if not force_joins:
         return True
-    chat_id = settings['force_join_chat_id']
-    try:
-        member = await app.bot.get_chat_member(chat_id, user_id)
-        if member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR,
-                              ChatMemberStatus.OWNER):
-            return True
-    except Exception:
-        pass
-    return False
+    for fj in force_joins:
+        try:
+            member = await app.bot.get_chat_member(fj['chat_id'], user_id)
+            if member.status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR,
+                                     ChatMemberStatus.OWNER):
+                return False
+        except Exception:
+            return False
+    return True
 
 
-async def send_force_join_msg(update: Update, settings: dict, lang: str = 'en'):
-    link = settings.get('force_join_link', '#')
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(t('force_join_btn', lang), url=link)],
-    ])
+async def send_force_join_msg(update: Update, force_joins: list, lang: str = 'en'):
+    buttons = [
+        [InlineKeyboardButton(
+            f"📢 {fj['title'] or f'Channel {i+1}'}",
+            url=fj['link']
+        )]
+        for i, fj in enumerate(force_joins)
+    ]
+    kb = InlineKeyboardMarkup(buttons)
     text = f"{t('force_join_title', lang)}\n\n{t('force_join_body', lang)}"
     if update.message:
         await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -136,9 +140,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Check force join
     settings = db.get_bot_settings(bot_id)
-    if settings and settings.get('force_join_chat_id'):
+    force_joins = db.get_force_joins(bot_id)
+    if force_joins:
         if not await check_force_join(bot_id, user.id, ctx.application):
-            await send_force_join_msg(update, settings, lang)
+            await send_force_join_msg(update, force_joins, lang)
             return
 
     welcome_text = (settings or {}).get('welcome_text', 'Welcome! 🎯 I am a Quiz Bot.')
@@ -872,8 +877,9 @@ async def cmd_adminhelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "└ /forward — Reply to a message to forward it to all users\n\n"
 
         "🔗 <b>Force Join (Owner)</b>\n"
-        "┌ /fjoin <code>[link]</code> — Set a force-join channel link\n"
-        "└ /removefjoin — Remove the force-join requirement\n\n"
+        "┌ /fjoin <code>[link]</code> — Add a force-join channel (up to 5)\n"
+        "├ /fjoin — Show current force-join channel list\n"
+        "└ /removefjoin — Remove all force-join channels\n\n"
 
         "🔧 <b>Main Admin Only</b>\n"
         "┌ /activate — Activate this bot\n"
@@ -1017,9 +1023,10 @@ async def cmd_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     # Check force join
     settings = db.get_bot_settings(bot_id)
-    if settings and settings.get('force_join_chat_id'):
+    force_joins = db.get_force_joins(bot_id)
+    if force_joins:
         if not await check_force_join(bot_id, update.effective_user.id, ctx.application):
-            await send_force_join_msg(update, settings, lang)
+            await send_force_join_msg(update, force_joins, lang)
             return
 
     medals = ["🥇", "🥈", "🥉"]
@@ -1074,9 +1081,10 @@ async def cmd_myrank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_inactive_msg(update, lang)
         return
     settings = db.get_bot_settings(bot_id)
-    if settings and settings.get('force_join_chat_id'):
+    force_joins = db.get_force_joins(bot_id)
+    if force_joins:
         if not await check_force_join(bot_id, update.effective_user.id, ctx.application):
-            await send_force_join_msg(update, settings, lang)
+            await send_force_join_msg(update, force_joins, lang)
             return
 
     user = update.effective_user
@@ -1284,31 +1292,80 @@ async def cmd_fjoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_subowner(bot_id, update.effective_user.id):
         return
     args = ctx.args
+
     if not args:
-        await update.message.reply_text("Usage: /fjoin <channel or group link>\nExample: /fjoin https://t.me/mychannel")
+        # Show current list
+        force_joins = db.get_force_joins(bot_id)
+        if not force_joins:
+            await update.message.reply_text(
+                "🔗 <b>Force Join</b>\n\n"
+                "No force-join channels set yet.\n\n"
+                "<b>Usage:</b> <code>/fjoin https://t.me/yourchannel</code>\n"
+                "You can add up to <b>5</b> channels/groups.\n\n"
+                "Users must join ALL listed channels before they can use this bot.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            lines = "\n".join(
+                f"{i+1}. <a href='{fj['link']}'>{fj['title'] or 'Channel'}</a>"
+                for i, fj in enumerate(force_joins)
+            )
+            await update.message.reply_text(
+                f"🔗 <b>Force-Join Channels ({len(force_joins)}/5):</b>\n\n"
+                f"{lines}\n\n"
+                f"Add more: <code>/fjoin https://t.me/...</code>\n"
+                f"Remove all: /removefjoin",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
         return
-    link = args[0].strip()
-    try:
-        # Try to get chat id from link
-        username = link.split("t.me/")[-1].strip("/")
-        chat = await ctx.application.bot.get_chat(f"@{username}")
-        db.update_bot_settings(bot_id, force_join_link=link, force_join_chat_id=chat.id)
+
+    # Check limit
+    force_joins = db.get_force_joins(bot_id)
+    if len(force_joins) >= 5:
         await update.message.reply_text(
-            f"✅ <b>Force Join set!</b>\n\n"
-            f"Users must join <b>{chat.title}</b> to use this bot.",
+            "⚠️ <b>Maximum 5 force-join channels already set.</b>\n\n"
+            "Use /removefjoin to clear all, then add again.",
             parse_mode=ParseMode.HTML
         )
+        return
+
+    link = args[0].strip()
+    try:
+        username = link.split("t.me/")[-1].strip("/").split("?")[0]
+        chat = await ctx.application.bot.get_chat(f"@{username}")
+        db.add_force_join(bot_id, chat.id, link, chat.title or username)
+        updated = db.get_force_joins(bot_id)
+        lines = "\n".join(
+            f"{i+1}. <a href='{fj['link']}'>{fj['title'] or 'Channel'}</a>"
+            for i, fj in enumerate(updated)
+        )
+        await update.message.reply_text(
+            f"✅ <b>Force Join added!</b>\n\n"
+            f"<b>Current list ({len(updated)}/5):</b>\n{lines}\n\n"
+            f"Users must join ALL channels above to use this bot.",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
     except Exception as e:
-        await update.message.reply_text(f"❌ Could not set force join.\nError: {e}\n\n"
-                                        "Make sure the bot is an admin of that channel/group.")
+        await update.message.reply_text(
+            f"❌ <b>Could not add force join.</b>\n<code>{e}</code>\n\n"
+            "Make sure:\n"
+            "• The link is a public channel or group\n"
+            "• The bot is an admin of that channel/group",
+            parse_mode=ParseMode.HTML
+        )
 
 
 async def cmd_removefjoin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
     if not is_subowner(bot_id, update.effective_user.id):
         return
-    db.update_bot_settings(bot_id, force_join_link=None, force_join_chat_id=None)
-    await update.message.reply_text("✅ <b>Force Join removed!</b>\nUsers can now use the bot freely.", parse_mode=ParseMode.HTML)
+    db.remove_all_force_joins(bot_id)
+    await update.message.reply_text(
+        "✅ <b>Force Join removed!</b>\nUsers can now use the bot freely.",
+        parse_mode=ParseMode.HTML
+    )
 
 
 # ─── Main admin commands (in subbots) ────────────────────────────────────────
