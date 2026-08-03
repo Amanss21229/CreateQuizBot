@@ -11,8 +11,14 @@ if not MAIN_BOT_TOKEN:
 # Your Telegram numeric user ID (get it by sending /myid to the bot first time)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# Database file path
-DB_PATH = os.environ.get("DB_PATH", "quiz_bot.db")
+# ─── Neon PostgreSQL connection URL ───────────────────────────────────────────
+# Use NEON_DATABASE_URL so it doesn't clash with Replit's own managed DATABASE_URL.
+DATABASE_URL = os.environ.get("NEON_DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "NEON_DATABASE_URL environment variable is not set. "
+        "Set it to your Neon connection string (postgresql://user:pass@host/db?sslmode=require)."
+    )
 
 # Timezone for daily leaderboard (Indian Standard Time)
 TIMEZONE = "Asia/Kolkata"
