@@ -59,6 +59,7 @@ async def main():
 
     logger.info("Starting main bot...")
     app = build_main_app(MAIN_BOT_TOKEN)
+    bot_manager.set_main_app(app, asyncio.get_event_loop())
 
     async with app:
         await app.initialize()

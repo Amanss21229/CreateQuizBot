@@ -17,6 +17,24 @@ logger = logging.getLogger(__name__)
 _registry: Dict[int, dict] = {}
 _lock = threading.Lock()
 
+# Main bot references (set from main.py after building the main app)
+_main_app: Optional[Application] = None
+_main_loop = None
+
+
+def set_main_app(app: Application, loop) -> None:
+    global _main_app, _main_loop
+    _main_app = app
+    _main_loop = loop
+
+
+def get_main_app() -> Optional[Application]:
+    return _main_app
+
+
+def get_main_loop():
+    return _main_loop
+
 
 def get_app(bot_id: int) -> Optional[Application]:
     with _lock:

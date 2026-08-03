@@ -11,6 +11,11 @@ if not MAIN_BOT_TOKEN:
 # Your Telegram numeric user ID (get it by sending /myid to the bot first time)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
+# ─── Log Group ────────────────────────────────────────────────────────────────
+# Optional: set LOG_GROUP_ID to forward all private messages to a log group.
+_log_group_raw = os.environ.get("LOG_GROUP_ID", "").strip()
+LOG_GROUP_ID: int | None = int(_log_group_raw) if _log_group_raw else None
+
 # ─── Neon PostgreSQL connection URL ───────────────────────────────────────────
 # Use NEON_DATABASE_URL so it doesn't clash with Replit's own managed DATABASE_URL.
 DATABASE_URL = os.environ.get("NEON_DATABASE_URL")

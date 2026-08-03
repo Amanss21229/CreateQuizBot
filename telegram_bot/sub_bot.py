@@ -21,8 +21,9 @@ import database as db
 from config import (
     ADMIN_ID, OWNER_CONTACT_LINK, OWNER_USERNAME,
     MARKS_CORRECT, MARKS_WRONG, MARKS_NOT_ATTEMPTED,
-    GLOBAL_LEADERBOARD_LIMIT, TIMEZONE
+    GLOBAL_LEADERBOARD_LIMIT, TIMEZONE, LOG_GROUP_ID
 )
+import log_router
 from lang import t
 
 logger = logging.getLogger(__name__)
@@ -1495,6 +1496,19 @@ async def gate_inactive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         raise Exception("bot_inactive")
 
 
+# ─── Log forwarding ───────────────────────────────────────────────────────────
+
+async def forward_to_log_subbot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Forward any private non-command message to the log group via main bot."""
+    bot_id = get_bot_id_from_app(ctx.application)
+    bot_info = db.get_bot_by_id(bot_id)
+    if bot_info and bot_info.get("bot_username"):
+        label = f"@{bot_info['bot_username']}"
+    else:
+        label = f"SubBot #{bot_id}"
+    await log_router.forward_to_log(update, ctx, label, str(bot_id))
+
+
 # ─── Build subbot application ─────────────────────────────────────────────────
 
 def build_subbot_app(token: str, bot_id: int) -> Application:
@@ -1575,6 +1589,14 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
 
     # Group tracking
     app.add_handler(ChatMemberHandler(chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    # ── Forward all private non-command messages to log group ─────────────────
+    # group=1 so all group=0 handlers (conversation, correct-option, etc.) run first
+    if LOG_GROUP_ID:
+        app.add_handler(MessageHandler(
+            filters.ChatType.PRIVATE & ~filters.COMMAND,
+            forward_to_log_subbot,
+        ), group=1)
 
     # Schedule daily leaderboard at 10 PM IST
     ist_tz = pytz.timezone(TIMEZONE)

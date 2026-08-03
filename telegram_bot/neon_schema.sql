@@ -114,6 +114,16 @@ CREATE TABLE IF NOT EXISTS quiz_attempts (
     UNIQUE (poll_id, user_id)
 );
 
+-- ── Log message mapping (admin reply routing) ────────────────
+-- Maps a message forwarded to the log group back to its original
+-- sender so admin replies can be routed to the correct user/bot.
+CREATE TABLE IF NOT EXISTS log_messages (
+    log_msg_id  BIGINT PRIMARY KEY,
+    user_id     BIGINT NOT NULL,
+    source_key  TEXT   NOT NULL,   -- 'main' or str(bot_id)
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ============================================================
 --  Indexes (optional but recommended for performance)
 -- ============================================================

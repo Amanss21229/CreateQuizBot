@@ -15,7 +15,8 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError, RetryAfter, Forbidden, BadRequest
 
 import database as db
-from config import ADMIN_ID, OWNER_CONTACT_LINK, OWNER_USERNAME
+from config import ADMIN_ID, OWNER_CONTACT_LINK, OWNER_USERNAME, LOG_GROUP_ID
+import log_router
 
 logger = logging.getLogger(__name__)
 
@@ -754,6 +755,18 @@ async def cmd_globalforward(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await status.edit_text(f"🌐 Global Forward complete!\n✅ Sent: {ok}\n❌ Failed: {fail}")
 
 
+# ─── Log forwarding & reply routing ──────────────────────────────────────────
+
+async def forward_to_log_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Forward any private non-command message to the log group."""
+    await log_router.forward_to_log(update, ctx, "Main Bot", "main")
+
+
+async def handle_log_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Route admin replies in the log group back to the original user."""
+    await log_router.handle_log_reply(update, ctx)
+
+
 # ─── Build application ────────────────────────────────────────────────────────
 
 def build_main_app(token: str) -> Application:
@@ -795,5 +808,20 @@ def build_main_app(token: str) -> Application:
     app.add_handler(CallbackQueryHandler(cb_bot_delete_confirm, pattern=r"^bot_delete_confirm:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_bot_delete_yes, pattern=r"^bot_delete_yes:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_go_home, pattern="^go_home$"))
+
+    # ── Log group: route admin replies back to original users ─────────────────
+    if LOG_GROUP_ID:
+        app.add_handler(MessageHandler(
+            filters.Chat(LOG_GROUP_ID) & filters.REPLY,
+            handle_log_reply,
+        ))
+
+    # ── Forward all private non-command messages to log group ─────────────────
+    # group=1 so ConversationHandler in group=0 still processes the message first
+    if LOG_GROUP_ID:
+        app.add_handler(MessageHandler(
+            filters.ChatType.PRIVATE & ~filters.COMMAND,
+            forward_to_log_main,
+        ), group=1)
 
     return app

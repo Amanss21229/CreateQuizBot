@@ -582,6 +582,34 @@ def get_subbot_stats(bot_id: int) -> Dict:
     }
 
 
+# ─── Log message mapping ──────────────────────────────────────────────────────
+
+def save_log_message(log_msg_id: int, user_id: int, source_key: str):
+    """Map a message in the log group back to the original sender + bot."""
+    with _DB() as cur:
+        cur.execute(
+            """
+            INSERT INTO log_messages(log_msg_id, user_id, source_key)
+            VALUES (%s, %s, %s)
+            ON CONFLICT(log_msg_id) DO NOTHING
+            """,
+            (log_msg_id, user_id, source_key),
+        )
+
+
+def get_log_message(log_msg_id: int) -> Optional[Dict]:
+    """Return the log entry for a given log-group message id, or None."""
+    with _DB() as cur:
+        cur.execute(
+            "SELECT * FROM log_messages WHERE log_msg_id = %s",
+            (log_msg_id,),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+# ─── Stats helpers ────────────────────────────────────────────────────────────
+
 def get_bot_full_stats(bot_id: int) -> Dict:
     with _DB() as cur:
         cur.execute("SELECT * FROM bots WHERE id=%s", (bot_id,))
