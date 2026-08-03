@@ -1,11 +1,14 @@
 """
 Entry point — starts the main bot and all active subbots.
+Also exposes a lightweight HTTP health-check server so this can be
+deployed as a Render *web* service (Render requires a bound port).
 """
 import asyncio
 import logging
 import os
 import sys
 
+from aiohttp import web
 from telegram.ext import Application
 
 import database as db
@@ -24,9 +27,32 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+# ─── Health-check HTTP server ─────────────────────────────────────────────────
+
+async def handle_health(request):
+    return web.Response(text="OK")
+
+async def start_health_server():
+    """Bind to $PORT (default 8080) so Render web service health checks pass."""
+    port = int(os.environ.get("PORT", 8080))
+    app = web.Application()
+    app.router.add_get("/", handle_health)
+    app.router.add_get("/health", handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("Health-check server listening on port %d", port)
+
+
+# ─── Main entry point ─────────────────────────────────────────────────────────
+
 async def main():
     logger.info("Initialising database...")
     db.init_db()
+
+    logger.info("Starting health-check HTTP server...")
+    await start_health_server()
 
     logger.info("Launching active subbots in background threads...")
     await bot_manager.launch_all_active()

@@ -1,7 +1,12 @@
 import os
 
 # ─── Main Bot Configuration ───────────────────────────────────────────────────
-MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN", "8899018078:AAHF08SXk_Mr7FO_TwNk_2fiEM2IEOxiYQQ")
+MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN")
+if not MAIN_BOT_TOKEN:
+    raise RuntimeError(
+        "MAIN_BOT_TOKEN environment variable is not set. "
+        "Set it to your bot token from @BotFather before starting."
+    )
 
 # Your Telegram numeric user ID (get it by sending /myid to the bot first time)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
