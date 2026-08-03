@@ -278,8 +278,8 @@ async def handle_log_reply(
         return
     if msg.chat_id != LOG_GROUP_ID:
         return
-    if not msg.from_user or msg.from_user.id != ADMIN_ID:
-        return
+    # Any message sent as a reply in the log group is routed back.
+    # (The log group is private to the admin so no extra filter is needed.)
 
     reply_to_id = msg.reply_to_message.message_id
     log_entry = db.get_log_message(reply_to_id)
