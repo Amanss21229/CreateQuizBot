@@ -7,14 +7,10 @@ services:
     healthCheckPath: /health
     envVars:
       - key: MAIN_BOT_TOKEN
-        sync: false          # set this in Render dashboard → Environment
+        sync: false          # set in Render dashboard → Environment
       - key: ADMIN_ID
-        sync: false          # set this in Render dashboard → Environment
-      - key: DB_PATH
-        value: /data/quiz_bot.db
+        sync: false          # set in Render dashboard → Environment
+      - key: NEON_DATABASE_URL
+        sync: false          # set in Render dashboard → Environment (your Neon connection string)
       - key: PORT
-        value: "8080"
-    disk:
-      name: bot-data
-      mountPath: /data
-      sizeGB: 1
+        value: "10000"

@@ -11,9 +11,9 @@ A Telegram bot system that lets users create and manage their own quiz bots (sub
 
 ## Stack
 
-- Python 3.11
+- Python 3.12
 - python-telegram-bot v20.7 (async, with APScheduler job-queue)
-- SQLite (via built-in sqlite3)
+- PostgreSQL via Neon DB (psycopg2-binary, ThreadedConnectionPool)
 - pytz for IST timezone
 - Threading: each subbot runs in its own thread with its own asyncio loop
 
