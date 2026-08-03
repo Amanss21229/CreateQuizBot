@@ -2,4 +2,5 @@ python-telegram-bot[job-queue]==20.7
 pytz==2024.1
 deep-translator==1.11.4
 aiohttp==3.9.5
-psycopg2-binary==2.9.9
+psycopg[binary]>=3.1
+psycopg-pool>=3.1

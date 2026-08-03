@@ -1,36 +1,39 @@
-import psycopg2
-import psycopg2.extras
-import psycopg2.pool
+import psycopg
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from config import DATABASE_URL
 
 # ── Connection pool (thread-safe — subbots run in separate threads) ────────────
-_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+_pool: Optional[ConnectionPool] = None
 
 
-def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+def _get_pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        _pool = psycopg2.pool.ThreadedConnectionPool(1, 20, DATABASE_URL)
+        _pool = ConnectionPool(
+            conninfo=DATABASE_URL,
+            min_size=1,
+            max_size=20,
+            kwargs={"row_factory": dict_row},
+            open=True,
+        )
     return _pool
 
 
 class _DB:
     """Context manager: borrows a connection from the pool, auto-commits/rollbacks."""
     def __enter__(self):
-        self.conn = _get_pool().getconn()
-        self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        self._ctx = _get_pool().connection()
+        self.conn = self._ctx.__enter__()
+        self.cur = self.conn.cursor()
         return self.cur
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type:
-            self.conn.rollback()
-        else:
-            self.conn.commit()
         self.cur.close()
-        _get_pool().putconn(self.conn)
+        self._ctx.__exit__(exc_type, exc_val, exc_tb)
 
 
 def init_db():

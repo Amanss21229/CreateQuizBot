@@ -6,11 +6,15 @@ services:
     startCommand: python main.py
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
       - key: MAIN_BOT_TOKEN
-        sync: false          # set in Render dashboard → Environment
+        sync: false
       - key: ADMIN_ID
-        sync: false          # set in Render dashboard → Environment
+        sync: false
       - key: NEON_DATABASE_URL
-        sync: false          # set in Render dashboard → Environment (your Neon connection string)
+        sync: false
+      - key: LOG_GROUP_ID
+        sync: false
       - key: PORT
         value: "10000"
