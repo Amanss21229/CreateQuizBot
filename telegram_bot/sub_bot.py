@@ -147,7 +147,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await send_force_join_msg(update, force_joins, lang)
             return
 
-    welcome_text = (settings or {}).get('welcome_text', 'Welcome! 🎯 I am a Quiz Bot. Use /help To Know All the Commands 🗳.')
+    welcome_text = (settings or {}).get('welcome_text', 'Welcome! 🎯 I am a Quiz Bot. Use /help To Know All the Commands.')
     welcome_image = (settings or {}).get('welcome_image_file_id')
 
     buttons = [[InlineKeyboardButton("➕ Add Me to Your Group",
