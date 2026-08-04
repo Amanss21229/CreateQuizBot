@@ -1,0 +1,50 @@
+2026-08-04T06:00:47.572603616Z Exception in thread subbot-1:
+2026-08-04T06:00:47.57438196Z Traceback (most recent call last):
+2026-08-04T06:00:47.57521578Z   File "/opt/render/project/python/Python-3.14.3/lib/python3.14/threading.py", line 1082, in _bootstrap_inner
+2026-08-04T06:00:47.57523058Z     self._context.run(self.run)
+2026-08-04T06:00:47.57523364Z     ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+2026-08-04T06:00:47.575237511Z   File "/opt/render/project/python/Python-3.14.3/lib/python3.14/threading.py", line 1024, in run
+2026-08-04T06:00:47.575244611Z     self._target(*self._args, **self._kwargs)
+2026-08-04T06:00:47.575248771Z     ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-04T06:00:47.575253221Z   File "/opt/render/project/src/telegram_bot/bot_manager.py", line 58, in _run_subbot
+2026-08-04T06:00:47.575256801Z     app = build_subbot_app(token, bot_id)
+2026-08-04T06:00:47.575260531Z   File "/opt/render/project/src/telegram_bot/sub_bot.py", line 1522, in build_subbot_app
+2026-08-04T06:00:47.575264731Z     .build()
+2026-08-04T06:00:47.575268721Z      ~~~~~^^
+2026-08-04T06:00:47.575273501Z   File "/opt/render/project/src/.venv/lib/python3.14/site-packages/telegram/ext/_applicationbuilder.py", line 312, in build
+2026-08-04T06:00:47.575278081Z     updater = Updater(bot=bot, update_queue=update_queue)
+2026-08-04T06:00:47.575281552Z   File "/opt/render/project/src/.venv/lib/python3.14/site-packages/telegram/ext/_updater.py", line 128, in __init__
+2026-08-04T06:00:47.575284792Z     self.__polling_cleanup_cb: Optional[Callable[[], Coroutine[Any, Any, None]]] = None
+2026-08-04T06:00:47.575288092Z     ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-04T06:00:47.575303142Z AttributeError: 'Updater' object has no attribute '_Updater__polling_cleanup_cb' and no __dict__ for setting new attributes
+2026-08-04T06:00:49.081024683Z 2026-08-04 06:00:49,080 | INFO     | bot_manager | All active subbots started.
+2026-08-04T06:00:49.081055693Z 2026-08-04 06:00:49,080 | INFO     | __main__ | Starting main bot...
+2026-08-04T06:00:49.282276032Z Traceback (most recent call last):
+2026-08-04T06:00:49.368224139Z   File "/opt/render/project/src/telegram_bot/main.py", line 79, in <module>
+2026-08-04T06:00:49.368250009Z     asyncio.run(main())
+2026-08-04T06:00:49.368253299Z     ~~~~~~~~~~~^^^^^^^^
+2026-08-04T06:00:49.36825685Z   File "/opt/render/project/python/Python-3.14.3/lib/python3.14/asyncio/runners.py", line 204, in run
+2026-08-04T06:00:49.3682601Z     return runner.run(main)
+2026-08-04T06:00:49.36826255Z            ~~~~~~~~~~^^^^^^
+2026-08-04T06:00:49.36826777Z   File "/opt/render/project/python/Python-3.14.3/lib/python3.14/asyncio/runners.py", line 127, in run
+2026-08-04T06:00:49.36827131Z     return self._loop.run_until_complete(task)
+2026-08-04T06:00:49.36827402Z            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+2026-08-04T06:00:49.36827724Z   File "/opt/render/project/python/Python-3.14.3/lib/python3.14/asyncio/base_events.py", line 719, in run_until_complete
+2026-08-04T06:00:49.36829548Z     return future.result()
+2026-08-04T06:00:49.368298071Z            ~~~~~~~~~~~~~^^
+2026-08-04T06:00:49.36830054Z   File "/opt/render/project/src/telegram_bot/main.py", line 61, in main
+2026-08-04T06:00:49.368302971Z     app = build_main_app(MAIN_BOT_TOKEN)
+2026-08-04T06:00:49.368306321Z   File "/opt/render/project/src/telegram_bot/main_bot.py", line 773, in build_main_app
+2026-08-04T06:00:49.368309381Z     app = Application.builder().token(token).build()
+2026-08-04T06:00:49.368311881Z   File "/opt/render/project/src/.venv/lib/python3.14/site-packages/telegram/ext/_applicationbuilder.py", line 312, in build
+2026-08-04T06:00:49.368314311Z     updater = Updater(bot=bot, update_queue=update_queue)
+2026-08-04T06:00:49.368316821Z   File "/opt/render/project/src/.venv/lib/python3.14/site-packages/telegram/ext/_updater.py", line 128, in __init__
+2026-08-04T06:00:49.368319311Z     self.__polling_cleanup_cb: Optional[Callable[[], Coroutine[Any, Any, None]]] = None
+2026-08-04T06:00:49.368321731Z     ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-04T06:00:49.368324301Z AttributeError: 'Updater' object has no attribute '_Updater__polling_cleanup_cb' and no __dict__ for setting new attributes
+2026-08-04T06:00:49.668641127Z Exception ignored while calling deallocator <function ConnectionPool.__del__ at 0x76fe89fe3110>:
+2026-08-04T06:00:49.668669338Z Traceback (most recent call last):
+2026-08-04T06:00:49.668674148Z   File "/opt/render/project/src/.venv/lib/python3.14/site-packages/psycopg_pool/pool.py", line 126, in __del__
+2026-08-04T06:00:49.668677468Z   File "/opt/render/project/src/.venv/lib/python3.14/site-packages/psycopg_pool/_acompat.py", line 152, in gather
+2026-08-04T06:00:49.668688658Z   File "/opt/render/project/python/Python-3.14.3/lib/python3.14/threading.py", line 1133, in join
+2026-08-04T06:00:49.668692359Z PythonFinalizationError: cannot join thread at interpreter shutdown
