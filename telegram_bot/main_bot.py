@@ -20,8 +20,9 @@ import log_router
 
 logger = logging.getLogger(__name__)
 
-# User guidance video for creating, managing, and monetising a quiz bot.
+# User guidance and support links shown in the main bot's /start menu.
 GUIDANCE_VIDEO_URL = "https://youtu.be/MgKKDL3552o?si=c-MDBuADT8e0SPy2"
+OWNER_SUPPORT_URL = "https://t.me/Aman_PersonalBot"
 
 # ─── Conversation states ──────────────────────────────────────────────────────
 WAITING_TOKEN = 1
@@ -40,9 +41,10 @@ def user_link(user_id: int, name: str) -> str:
 
 def main_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎥 Watch How-To Video", url=GUIDANCE_VIDEO_URL)],
         [InlineKeyboardButton("🤖 Create Quiz Bot", callback_data="create_bot")],
         [InlineKeyboardButton("📋 My Bots", callback_data="my_bots")],
+        [InlineKeyboardButton("🎥 Tutorial: Create, Manage & Earn", url=GUIDANCE_VIDEO_URL)],
+        [InlineKeyboardButton("🆘 Contact Owner for Help", url=OWNER_SUPPORT_URL)],
     ])
 
 
