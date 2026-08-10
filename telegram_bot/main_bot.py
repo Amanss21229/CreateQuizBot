@@ -20,6 +20,9 @@ import log_router
 
 logger = logging.getLogger(__name__)
 
+# User guidance video for creating, managing, and monetising a quiz bot.
+GUIDANCE_VIDEO_URL = "https://youtu.be/MgKKDL3552o?si=c-MDBuADT8e0SPy2"
+
 # ─── Conversation states ──────────────────────────────────────────────────────
 WAITING_TOKEN = 1
 CONFIRM_DELETE = 2
@@ -37,6 +40,7 @@ def user_link(user_id: int, name: str) -> str:
 
 def main_keyboard():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎥 Watch How-To Video", url=GUIDANCE_VIDEO_URL)],
         [InlineKeyboardButton("🤖 Create Quiz Bot", callback_data="create_bot")],
         [InlineKeyboardButton("📋 My Bots", callback_data="my_bots")],
     ])
