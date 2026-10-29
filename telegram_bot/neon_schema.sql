@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS log_messages (
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS subbot_admins (
+    bot_id      BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    user_id     BIGINT NOT NULL,
+    promoted_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (bot_id, user_id)
+);
+
 -- ============================================================
 --  Indexes (optional but recommended for performance)
 -- ============================================================
