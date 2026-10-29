@@ -36,10 +36,52 @@ class _DB:
         self._ctx.__exit__(exc_type, exc_val, exc_tb)
 
 
-def init_db():
-    """Verify Neon DB connectivity. Tables are created via neon_schema.sql."""
-    with _DB() as cur:
-        cur.execute("SELECT 1")
+    def init_db():
+        """Verify DB connectivity and ensure runtime-managed tables exist."""
+        with _DB() as cur:
+            cur.execute("SELECT 1")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS subbot_admins (
+                    bot_id BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    promoted_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (bot_id, user_id)
+                )
+            """)
+
+    def is_subbot_admin(bot_id: int, user_id: int) -> bool:
+        """Return whether user_id is an admin of this specific subbot."""
+        with _DB() as cur:
+            cur.execute(
+                "SELECT 1 FROM subbot_admins WHERE bot_id=%s AND user_id=%s",
+                (bot_id, user_id)
+            )
+            return cur.fetchone() is not None
+
+
+    def add_subbot_admin(bot_id: int, user_id: int) -> bool:
+        """Promote user for this subbot only. Returns False if already an admin."""
+        with _DB() as cur:
+            cur.execute(
+                """
+                INSERT INTO subbot_admins (bot_id, user_id)
+                VALUES (%s, %s)
+                ON CONFLICT (bot_id, user_id) DO NOTHING
+                RETURNING user_id
+                """,
+                (bot_id, user_id)
+            )
+            return cur.fetchone() is not None
+
+
+    def remove_subbot_admin(bot_id: int, user_id: int) -> bool:
+        """Demote user from this subbot only. Returns False if not an admin."""
+        with _DB() as cur:
+            cur.execute(
+                "DELETE FROM subbot_admins WHERE bot_id=%s AND user_id=%s RETURNING user_id",
+                (bot_id, user_id)
+            )
+            return cur.fetchone() is not None
 
 
 # ─── User helpers ─────────────────────────────────────────────────────────────
