@@ -94,6 +94,7 @@ def is_subowner(bot_id: int, user_id: int) -> bool:
     bot = db.get_bot_by_id(bot_id)
     return bot is not None and bot['owner_id'] == user_id
 
+
 def is_subadmin(bot_id: int, user_id: int) -> bool:
     """Admin permission is scoped to one specific subbot."""
     return db.is_subbot_admin(bot_id, user_id)
@@ -638,9 +639,7 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if not can_manage_quiz(bot_id, update.effective_user.id):
-        await update.message.reply_text(
-            "⛔ Only this subbot's owner or an admin can send quizzes."
-        )
+        await update.message.reply_text("⛔ Only this subbot's owner or an admin can send quizzes.")
         return
 
     settings = db.get_bot_settings(bot_id)
@@ -878,9 +877,11 @@ async def cmd_adminhelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "┌ /start — Open settings panel\n"
         "├ /setmgmt — Set this group as quiz management group\n"
         "│   (run this in the group you'll send quizzes from)\n"
-        "└ /status — Show bot status & connected groups count\n\n"
+        "├ /promote USER_ID — Give this subbot's admin access\n"
+        "├ /demote USER_ID — Remove this subbot's admin access\n"
+        "└ /status — Show bot status\n\n"
 
-        "📤 <b>Quiz Flow (Owner)</b>\n"
+        "📤 <b>Quiz Flow (Owner/Admin)</b>\n"
         "┌ 1. Send a Quiz poll in the management group\n"
         "├ 2. Reply to that poll with correct option: <code>1/2/3/4</code> or <code>A/B/C/D</code>\n"
         "├ 3. Quiz auto-distributes to all groups in 30 seconds\n"
@@ -1153,14 +1154,66 @@ async def cmd_myrank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
+# ─── Subbot owner: promote / demote admins ─────────────────────────────────────
+
+async def cmd_promote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    bot_id = get_bot_id_from_app(ctx.application)
+    if not is_subowner(bot_id, update.effective_user.id):
+        await update.message.reply_text("⛔ Only this subbot's owner can promote admins.")
+        return
+    if len(ctx.args) != 1 or not ctx.args[0].isdigit():
+        await update.message.reply_text("Usage: <code>/promote USER_ID</code>", parse_mode=ParseMode.HTML)
+        return
+    target_id = int(ctx.args[0])
+    if target_id == update.effective_user.id:
+        await update.message.reply_text("ℹ️ You are already the owner of this subbot.")
+        return
+    added = db.add_subbot_admin(bot_id, target_id)
+    if added:
+        await update.message.reply_text(
+            f"✅ User <code>{target_id}</code> is now an admin of this subbot.\n"
+            "They can manage quizzes and use /stats, /status, and /send only in this bot's quiz management group.",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(f"ℹ️ User <code>{target_id}</code> is already an admin of this subbot.", parse_mode=ParseMode.HTML)
+
+
+async def cmd_demote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    bot_id = get_bot_id_from_app(ctx.application)
+    if not is_subowner(bot_id, update.effective_user.id):
+        await update.message.reply_text("⛔ Only this subbot's owner can demote admins.")
+        return
+    if len(ctx.args) != 1 or not ctx.args[0].isdigit():
+        await update.message.reply_text("Usage: <code>/demote USER_ID</code>", parse_mode=ParseMode.HTML)
+        return
+    target_id = int(ctx.args[0])
+    if target_id == update.effective_user.id:
+        await update.message.reply_text("⛔ The owner cannot be demoted with this command.")
+        return
+    removed = db.remove_subbot_admin(bot_id, target_id)
+    if removed:
+        await update.message.reply_text(f"✅ User <code>{target_id}</code> is no longer an admin of this subbot.", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"ℹ️ User <code>{target_id}</code> was not an admin of this subbot.", parse_mode=ParseMode.HTML)
+
+
 # ─── Subowner commands ────────────────────────────────────────────────────────
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
-    if not is_subowner(bot_id, update.effective_user.id):
+    user_id = update.effective_user.id
+    is_owner = is_subowner(bot_id, user_id)
+    is_admin = is_subadmin(bot_id, user_id)
+
+    # Preserve the owner's existing private-chat behavior. Promoted admins
+    # may use /stats only in this subbot's configured management group.
+    if is_owner:
+        if update.effective_chat.type != 'private':
+            return
+    elif not (is_admin and is_subbot_management_group(bot_id, update.effective_chat.id)):
         return
-    if update.effective_chat.type not in ('private',):
-        return
+
     stats = db.get_subbot_stats(bot_id)
     await update.message.reply_text(
         f"📊 <b>Bot Statistics</b>\n\n"
@@ -1175,20 +1228,39 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bot_id = get_bot_id_from_app(ctx.application)
-    if not is_subowner(bot_id, update.effective_user.id):
+    user_id = update.effective_user.id
+    is_owner = is_subowner(bot_id, user_id)
+    is_admin = is_subadmin(bot_id, user_id)
+
+    # Promoted admins may use /status only in this subbot's management group.
+    # Keep the owner's original /status behavior and buttons unchanged.
+    if not is_owner and not (is_admin and is_subbot_management_group(bot_id, update.effective_chat.id)):
         return
+
     bot_info = db.get_bot_by_id(bot_id)
-    if bot_info['status'] == 'active':
-        text = "🟢 <b>Bot Status: ACTIVE</b>\n\nYour bot is running smoothly! ✅"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data=f"open_settings:{bot_id}")]])
+    if not bot_info:
+        return
+
+    if is_owner:
+        if bot_info['status'] == 'active':
+            text = "🟢 <b>Bot Status: ACTIVE</b>\n\nYour bot is running smoothly! ✅"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data=f"open_settings:{bot_id}")]])
+        else:
+            text = ("🔴 <b>Bot Status: INACTIVE</b>\n\n"
+                    "Your bot is currently not working.\n"
+                    "Please contact the admin to reactivate it.")
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📩 Contact for Activation", url=OWNER_CONTACT_LINK)],
+                [InlineKeyboardButton("◀️ Back", callback_data=f"open_settings:{bot_id}")],
+            ])
     else:
-        text = ("🔴 <b>Bot Status: INACTIVE</b>\n\n"
-                "Your bot is currently not working.\n"
-                "Please contact the admin to reactivate it.")
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📩 Contact for Activation", url=OWNER_CONTACT_LINK)],
-            [InlineKeyboardButton("◀️ Back", callback_data=f"open_settings:{bot_id}")],
-        ])
+        kb = None
+        if bot_info['status'] == 'active':
+            text = "🟢 <b>Bot Status: ACTIVE</b>\n\nThis bot is active and running. ✅"
+        else:
+            text = ("🔴 <b>Bot Status: INACTIVE</b>\n\n"
+                    "This bot is currently inactive. Contact the main admin for activation.")
+
     await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
@@ -1577,6 +1649,9 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
     app.add_handler(CommandHandler("send", cmd_send))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
     app.add_handler(CommandHandler("myRank", cmd_myrank))
+    # Subbot owner-only access management
+    app.add_handler(CommandHandler("promote", cmd_promote))
+    app.add_handler(CommandHandler("demote", cmd_demote))
     # Subowner commands
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("status", cmd_status))
