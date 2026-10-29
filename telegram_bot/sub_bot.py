@@ -94,6 +94,21 @@ def is_subowner(bot_id: int, user_id: int) -> bool:
     bot = db.get_bot_by_id(bot_id)
     return bot is not None and bot['owner_id'] == user_id
 
+def is_subadmin(bot_id: int, user_id: int) -> bool:
+    """Admin permission is scoped to one specific subbot."""
+    return db.is_subbot_admin(bot_id, user_id)
+
+
+def can_manage_quiz(bot_id: int, user_id: int) -> bool:
+    """Owners and promoted admins may manage quizzes in this bot's mgmt group."""
+    return is_subowner(bot_id, user_id) or is_subadmin(bot_id, user_id)
+
+
+def is_subbot_management_group(bot_id: int, chat_id: int) -> bool:
+    settings = db.get_bot_settings(bot_id) or {}
+    mgmt_gid = settings.get('quiz_management_group_id')
+    return bool(mgmt_gid) and chat_id == int(mgmt_gid)
+
 
 def is_main_admin(user_id: int) -> bool:
     return ADMIN_ID != 0 and user_id == ADMIN_ID
@@ -399,7 +414,7 @@ async def receive_poll(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     sender_id = update.effective_user.id
-    if not is_subowner(bot_id, sender_id):
+    if not can_manage_quiz(bot_id, sender_id):
         return
 
     settings = db.get_bot_settings(bot_id)
@@ -465,7 +480,7 @@ async def receive_correct_option(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         return
 
     sender_id = update.effective_user.id
-    if not is_subowner(bot_id, sender_id):
+    if not can_manage_quiz(bot_id, sender_id):
         return
 
     settings = db.get_bot_settings(bot_id)
@@ -622,8 +637,10 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_inactive_msg(update)
         return
 
-    if not is_subowner(bot_id, update.effective_user.id):
-        await update.message.reply_text("⛔ Only the bot owner can send quizzes.")
+    if not can_manage_quiz(bot_id, update.effective_user.id):
+        await update.message.reply_text(
+            "⛔ Only this subbot's owner or an admin can send quizzes."
+        )
         return
 
     settings = db.get_bot_settings(bot_id)
