@@ -48,6 +48,24 @@ def init_db():
                 PRIMARY KEY (bot_id, user_id)
             )
         """)
+        cur.execute("""CREATE TABLE IF NOT EXISTS auto_quiz_configs (
+            bot_id BIGINT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+            chat_id BIGINT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS auto_quizzes (
+            id BIGSERIAL PRIMARY KEY, bot_id BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+            chat_id BIGINT NOT NULL, source_message_id BIGINT NOT NULL, question TEXT NOT NULL,
+            options TEXT NOT NULL, explanation TEXT DEFAULT '', correct_option INTEGER,
+            answered_at TIMESTAMPTZ, status TEXT NOT NULL DEFAULT 'awaiting_answer',
+            created_at TIMESTAMPTZ DEFAULT NOW(), sent_at TIMESTAMPTZ,
+            UNIQUE(bot_id, source_message_id))""")
+        cur.execute("""CREATE INDEX IF NOT EXISTS idx_auto_quiz_queue
+            ON auto_quizzes(bot_id, status, answered_at, id)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS auto_quiz_sends (
+            id BIGSERIAL PRIMARY KEY, auto_quiz_id BIGINT NOT NULL, bot_id BIGINT NOT NULL,
+            group_id BIGINT NOT NULL, message_id BIGINT, poll_id TEXT UNIQUE,
+            sent_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(auto_quiz_id, group_id))""")
+        cur.execute("UPDATE auto_quizzes SET status='pending' WHERE status='processing'")
 
 
 def is_subbot_admin(bot_id: int, user_id: int) -> bool:
@@ -83,6 +101,87 @@ def remove_subbot_admin(bot_id: int, user_id: int) -> bool:
             (bot_id, user_id)
         )
         return cur.fetchone() is not None
+
+
+# ─── Shared auto-quiz management group ───────────────────────────────────────
+def enable_auto_quiz_bot(bot_id: int, chat_id: int):
+    with _DB() as cur:
+        cur.execute(
+            """INSERT INTO auto_quiz_configs(bot_id, chat_id, enabled) VALUES (%s,%s,TRUE)
+               ON CONFLICT (bot_id) DO UPDATE SET chat_id=EXCLUDED.chat_id, enabled=TRUE""",
+            (bot_id, chat_id)
+        )
+
+def get_auto_quiz_config(bot_id: int):
+    with _DB() as cur:
+        cur.execute("SELECT * FROM auto_quiz_configs WHERE bot_id=%s AND enabled=TRUE", (bot_id,))
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+def add_auto_quiz(bot_id: int, chat_id: int, source_message_id: int, question: str,
+                  options: list, explanation: str = "") -> bool:
+    with _DB() as cur:
+        cur.execute(
+            """INSERT INTO auto_quizzes(bot_id, chat_id, source_message_id, question, options, explanation)
+               VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (bot_id, source_message_id) DO NOTHING
+               RETURNING id""",
+            (bot_id, chat_id, source_message_id, question, json.dumps(options), explanation or "")
+        )
+        return cur.fetchone() is not None
+
+def get_auto_quiz_by_source(bot_id: int, source_message_id: int):
+    with _DB() as cur:
+        cur.execute(
+            "SELECT * FROM auto_quizzes WHERE bot_id=%s AND source_message_id=%s",
+            (bot_id, source_message_id)
+        )
+        row = cur.fetchone()
+    if row:
+        d = dict(row); d['options'] = json.loads(d['options']); return d
+    return None
+
+def set_auto_quiz_answer(bot_id: int, source_message_id: int, correct_option: int) -> bool:
+    with _DB() as cur:
+        cur.execute(
+            """UPDATE auto_quizzes SET correct_option=%s, answered_at=NOW(), status='pending'
+               WHERE bot_id=%s AND source_message_id=%s AND correct_option IS NULL
+               RETURNING id""",
+            (correct_option, bot_id, source_message_id)
+        )
+        return cur.fetchone() is not None
+
+def get_next_auto_quiz(bot_id: int):
+    """Atomically claim the oldest answered quiz so scheduled jobs cannot double-send it."""
+    with _DB() as cur:
+        cur.execute(
+            """UPDATE auto_quizzes SET status='processing'
+               WHERE id=(SELECT id FROM auto_quizzes WHERE bot_id=%s AND status='pending'
+                         AND correct_option IS NOT NULL ORDER BY answered_at ASC, id ASC
+                         FOR UPDATE SKIP LOCKED LIMIT 1)
+               RETURNING *""", (bot_id,)
+        )
+        row = cur.fetchone()
+    if row:
+        d = dict(row); d['options'] = json.loads(d['options']); return d
+    return None
+
+def get_auto_quiz_sent_groups(quiz_id: int):
+    with _DB() as cur:
+        cur.execute("SELECT group_id FROM auto_quiz_sends WHERE auto_quiz_id=%s", (quiz_id,))
+        return {int(r['group_id']) for r in cur.fetchall()}
+
+def release_auto_quiz(quiz_id: int):
+    with _DB() as cur:
+        cur.execute("UPDATE auto_quizzes SET status='pending' WHERE id=%s AND status='processing'", (quiz_id,))
+
+def mark_auto_quiz_sent(quiz_id: int):
+    with _DB() as cur:
+        cur.execute("UPDATE auto_quizzes SET status='sent', sent_at=NOW() WHERE id=%s AND status='processing'", (quiz_id,))
+
+def count_pending_auto_quizzes(bot_id: int) -> int:
+    with _DB() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM auto_quizzes WHERE bot_id=%s AND status='pending' AND correct_option IS NOT NULL", (bot_id,))
+        return cur.fetchone()['n']
 
 
 # ─── User helpers ─────────────────────────────────────────────────────────────
@@ -444,16 +543,24 @@ def add_quiz_send(quiz_id: int, group_id: int, message_id: int, poll_id: str):
         )
 
 
+def add_auto_quiz_send(auto_quiz_id: int, bot_id: int, group_id: int, message_id: int, poll_id: str):
+    with _DB() as cur:
+        cur.execute(
+            "INSERT INTO auto_quiz_sends(auto_quiz_id, bot_id, group_id, message_id, poll_id) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (auto_quiz_id, group_id) DO NOTHING",
+            (auto_quiz_id, bot_id, group_id, message_id, poll_id or None)
+        )
+
 def get_quiz_by_poll_id(poll_id: str) -> Optional[Dict]:
     with _DB() as cur:
         cur.execute(
             """
             SELECT qs.quiz_id, qs.group_id, q.bot_id, q.correct_option
-            FROM quiz_sends qs
-            JOIN quizzes q ON qs.quiz_id = q.id
-            WHERE qs.poll_id = %s
-            """,
-            (poll_id,)
+            FROM quiz_sends qs JOIN quizzes q ON qs.quiz_id = q.id WHERE qs.poll_id = %s
+            UNION ALL
+            SELECT aq.id AS quiz_id, aqs.group_id, aqs.bot_id, aq.correct_option
+            FROM auto_quiz_sends aqs JOIN auto_quizzes aq ON aq.id=aqs.auto_quiz_id
+            WHERE aqs.poll_id=%s LIMIT 1
+            """, (poll_id, poll_id)
         )
         row = cur.fetchone()
     return dict(row) if row else None
