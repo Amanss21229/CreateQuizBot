@@ -399,6 +399,141 @@ async def cmd_setmgmt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ─── Shared Auto Quiz Management Group ───────────────────────────────────────
+AUTO_QUIZ_MANAGEMENT_GROUP_ID = -1003517019615
+
+async def cmd_setauto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enable this subbot in the shared auto-quiz group; owner-only."""
+    bot_id = get_bot_id_from_app(ctx.application)
+    if update.effective_chat.id != AUTO_QUIZ_MANAGEMENT_GROUP_ID:
+        return
+    if not is_subowner(bot_id, update.effective_user.id):
+        await update.message.reply_text("⛔ Only this subbot's owner can enable auto-quiz management.")
+        return
+    if len(ctx.args) != 1:
+        await update.message.reply_text("Usage: /setauto @SubBotUsername")
+        return
+    own = (db.get_bot_by_id(bot_id) or {}).get('bot_username', '').lstrip('@').lower()
+    requested = ctx.args[0].lstrip('@').lower()
+    if not own or requested != own:
+        return
+    db.enable_auto_quiz_bot(bot_id, AUTO_QUIZ_MANAGEMENT_GROUP_ID)
+    await update.message.reply_text(
+        f"✅ <b>@{own}</b> is now enabled in Auto Quiz Management.\n\n"
+        "Send any quiz poll here, then reply to that poll with its correct option. "
+        "It will enter this bot's FIFO queue and be scheduled every 30 minutes (09:00–21:30 IST).",
+        parse_mode=ParseMode.HTML
+    )
+
+async def auto_receive_poll(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    bot_id = get_bot_id_from_app(ctx.application)
+    msg = update.effective_message
+    if not msg or not msg.poll or msg.chat_id != AUTO_QUIZ_MANAGEMENT_GROUP_ID:
+        return
+    if not db.get_auto_quiz_config(bot_id):
+        return
+    poll = msg.poll
+    if poll.type != 'quiz':
+        await msg.reply_text("⚠️ Please send a Telegram Quiz Poll, not a regular poll.")
+        return
+    saved = db.add_auto_quiz(bot_id, msg.chat_id, msg.message_id, poll.question,
+                             [o.text for o in poll.options], poll.explanation or '')
+    if saved:
+        await msg.reply_text(
+            f"📥 Quiz queued for @{(db.get_bot_by_id(bot_id) or {}).get('bot_username','subbot')}.\n"
+            "Reply directly to this poll with the correct option number or letter.\n"
+            "The quiz will be scheduled only after its answer is received.",
+            parse_mode=ParseMode.HTML
+        )
+
+async def auto_receive_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    bot_id = get_bot_id_from_app(ctx.application)
+    msg = update.effective_message
+    if not msg or not msg.text or msg.chat_id != AUTO_QUIZ_MANAGEMENT_GROUP_ID or not msg.reply_to_message:
+        return
+    if not db.get_auto_quiz_config(bot_id):
+        return
+    replied = msg.reply_to_message
+    # An auto-quiz record exists only for polls collected by this subbot.
+    quiz = db.get_auto_quiz_by_source(bot_id, replied.message_id)
+    if not quiz:
+        return
+    raw = msg.text.strip().upper()
+    letters = {chr(65+i): i for i in range(len(quiz['options']))}
+    idx = int(raw)-1 if raw.isdigit() and 1 <= int(raw) <= len(quiz['options']) else letters.get(raw)
+    if idx is None:
+        await msg.reply_text("⚠️ Invalid answer. Reply with an option number or letter (e.g. 2 or B).")
+        return
+    if db.set_auto_quiz_answer(bot_id, replied.message_id, idx):
+        await msg.reply_text(
+            f"✅ Correct answer saved: <b>{quiz['options'][idx]}</b>\n"
+            f"📋 Pending in @{(db.get_bot_by_id(bot_id) or {}).get('bot_username','subbot')}'s FIFO queue: "
+            f"<b>{db.count_pending_auto_quizzes(bot_id)}</b>",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await msg.reply_text("ℹ️ This quiz already has an answer saved or is already queued.")
+
+async def auto_quiz_slot(context: ContextTypes.DEFAULT_TYPE):
+    """Send one oldest answered quiz to this subbot's connected groups."""
+    bot_id = context.job.data['bot_id']
+    config = db.get_auto_quiz_config(bot_id)
+    if not config:
+        return
+    quiz = db.get_next_auto_quiz(bot_id)
+    if not quiz:
+        return
+    groups = [g for g in db.get_bot_groups(bot_id)
+              if int(g['group_id']) not in (AUTO_QUIZ_MANAGEMENT_GROUP_ID, int(config['chat_id']))]
+    if not groups:
+        logger.info("[auto_quiz] No target groups for bot %s; quiz remains queued", bot_id)
+        db.release_auto_quiz(quiz['id'])
+        return
+    bot_info = db.get_bot_by_id(bot_id) or {}
+    username = '@' + (bot_info.get('bot_username') or '').lstrip('@')
+    if len(quiz['options']) >= 12:
+        logger.warning("[auto_quiz] Quiz %s has 12 options; Telegram's 12-option limit prevents branding", quiz['id'])
+    already_sent = db.get_auto_quiz_sent_groups(quiz['id'])
+    success = 0
+    translation_cache = {}
+    for grp in groups:
+        if int(grp['group_id']) in already_sent:
+            continue
+        lang = db.get_group_language(bot_id, grp['group_id'])
+        if lang not in translation_cache:
+            translation_cache[lang] = await _translate_quiz(quiz, lang)
+        question, translated_options, explanation = translation_cache[lang]
+        # Keep branding as the final, untranslated option.
+        if len(quiz['options']) < 12:
+            translated_options = translated_options + [username[:100]]
+        try:
+            sent = await context.bot.send_poll(
+                chat_id=grp['group_id'], question=question, options=translated_options,
+                type='quiz', correct_option_id=quiz['correct_option'],
+                explanation=explanation, is_anonymous=False
+            )
+            db.add_auto_quiz_send(quiz['id'], bot_id, grp['group_id'], sent.message_id,
+                                  sent.poll.id if sent.poll else '')
+            success += 1
+        except Exception as exc:
+            logger.warning("[auto_quiz] Send failed bot=%s group=%s: %s", bot_id, grp['group_id'], exc)
+    # Complete only when every target group has a recorded delivery. Failed groups
+    # are retried at the next slot; already delivered groups are skipped.
+    if len(already_sent) + success >= len(groups):
+        db.mark_auto_quiz_sent(quiz['id'])
+        try:
+            await context.bot.send_message(
+                chat_id=AUTO_QUIZ_MANAGEMENT_GROUP_ID,
+                text=f"📤 Auto quiz sent for @{username.lstrip('@')}\n"
+                     f"✅ Delivered to {success}/{len(groups)} group(s).\n"
+                     f"📚 Remaining queue: {db.count_pending_auto_quizzes(bot_id)}"
+            )
+        except Exception:
+            pass
+    else:
+        db.release_auto_quiz(quiz['id'])
+
+
 # ─── Quiz management: receive poll ───────────────────────────────────────────
 
 async def receive_poll(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1647,6 +1782,7 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("setmgmt", cmd_setmgmt))
     app.add_handler(CommandHandler("send", cmd_send))
+    app.add_handler(CommandHandler("setauto", cmd_setauto))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
     app.add_handler(CommandHandler("myRank", cmd_myrank))
     # Subbot owner-only access management
@@ -1669,7 +1805,11 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
     app.add_handler(CallbackQueryHandler(cb_settings_back, pattern=r"^settings_back:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_set_language, pattern=r"^set_lang:\d+:-?\d+:(en|hi)$"))
 
-    # Poll handlers
+    # Auto-quiz handlers run before the existing management-group handlers.
+    app.add_handler(MessageHandler(filters.POLL, auto_receive_poll), group=-1)
+    app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, auto_receive_answer), group=-1)
+
+    # Existing poll handlers (unchanged)
     app.add_handler(MessageHandler(filters.POLL, receive_poll))
     app.add_handler(PollAnswerHandler(poll_answer_handler))
 
@@ -1689,6 +1829,16 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
             filters.ChatType.PRIVATE & ~filters.COMMAND,
             forward_to_log_subbot,
         ), group=1)
+
+    # Schedule one FIFO auto-quiz delivery every 30 minutes, 09:00–21:30 IST.
+    ist_tz = pytz.timezone("Asia/Kolkata")
+    for slot_index in range(26):
+        total_minutes = 9 * 60 + slot_index * 30
+        slot_time = dt_time(hour=total_minutes // 60, minute=total_minutes % 60, tzinfo=ist_tz)
+        app.job_queue.run_daily(
+            auto_quiz_slot, time=slot_time, data={"bot_id": bot_id},
+            name=f"auto_quiz_{bot_id}_{slot_index}"
+        )
 
     # Schedule daily leaderboard at 10 PM IST
     ist_tz = pytz.timezone(TIMEZONE)
