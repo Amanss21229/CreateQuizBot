@@ -142,3 +142,40 @@ CREATE INDEX IF NOT EXISTS idx_quizzes_bot      ON quizzes (bot_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_sends_quiz  ON quiz_sends (quiz_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_bot     ON quiz_attempts (bot_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_poll    ON quiz_attempts (poll_id);
+
+
+-- ── Shared auto-quiz collection and scheduled FIFO queue ────────────────────
+CREATE TABLE IF NOT EXISTS auto_quiz_configs (
+    bot_id BIGINT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+    chat_id BIGINT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS auto_quizzes (
+    id BIGSERIAL PRIMARY KEY,
+    bot_id BIGINT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    chat_id BIGINT NOT NULL,
+    source_message_id BIGINT NOT NULL,
+    question TEXT NOT NULL,
+    options TEXT NOT NULL,
+    explanation TEXT DEFAULT '',
+    correct_option INTEGER,
+    answered_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'awaiting_answer',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    sent_at TIMESTAMPTZ,
+    UNIQUE(bot_id, source_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_auto_quiz_queue ON auto_quizzes(bot_id, status, answered_at, id);
+
+CREATE TABLE IF NOT EXISTS auto_quiz_sends (
+    id BIGSERIAL PRIMARY KEY,
+    auto_quiz_id BIGINT NOT NULL,
+    bot_id BIGINT NOT NULL,
+    group_id BIGINT NOT NULL,
+    message_id BIGINT,
+    poll_id TEXT UNIQUE,
+    sent_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(auto_quiz_id, group_id)
+);
