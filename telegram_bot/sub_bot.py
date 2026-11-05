@@ -3,7 +3,9 @@ Subbot logic — each quiz bot created by users runs this module.
 """
 import logging
 import asyncio
+import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import pytz
 
 from telegram import (
@@ -465,73 +467,154 @@ async def auto_receive_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("⚠️ Invalid answer. Reply with an option number or letter (e.g. 2 or B).")
         return
     if db.set_auto_quiz_answer(bot_id, replied.message_id, idx):
+        saved_quiz = db.get_auto_quiz_by_source(bot_id, replied.message_id) or quiz
+        scheduled = saved_quiz.get("scheduled_at")
+        ist = pytz.timezone("Asia/Kolkata")
+        scheduled_text = (
+            scheduled.astimezone(ist).strftime("%d %b %Y, %I:%M:%S %p IST")
+            if scheduled else "Schedule pending"
+        )
         await msg.reply_text(
-            f"✅ Correct answer saved: <b>{quiz['options'][idx]}</b>\n"
+            f"✅ Correct answer saved: <b>{quiz['options'][idx]}</b>\\n"
             f"📋 Pending in @{(db.get_bot_by_id(bot_id) or {}).get('bot_username','subbot')}'s FIFO queue: "
-            f"<b>{db.count_pending_auto_quizzes(bot_id)}</b>",
+            f"<b>{db.count_pending_auto_quizzes(bot_id)}</b>\\n"
+            f"🗓️ Scheduled distribution: <b>{scheduled_text}</b>",
             parse_mode=ParseMode.HTML
         )
     else:
         await msg.reply_text("ℹ️ This quiz already has an answer saved or is already queued.")
 
 async def auto_quiz_slot(context: ContextTypes.DEFAULT_TYPE):
-    """Send one oldest answered quiz to this subbot's connected groups."""
+    """Deliver the quiz whose persisted IST slot is due; report every attempt."""
     bot_id = context.job.data['bot_id']
     config = db.get_auto_quiz_config(bot_id)
     if not config:
         return
+
     quiz = db.get_next_auto_quiz(bot_id)
     if not quiz:
         return
-    groups = [g for g in db.get_bot_groups(bot_id)
-              if int(g['group_id']) not in (AUTO_QUIZ_MANAGEMENT_GROUP_ID, int(config['chat_id']))]
-    if not groups:
-        logger.info("[auto_quiz] No target groups for bot %s; quiz remains queued", bot_id)
-        db.release_auto_quiz(quiz['id'])
-        return
+
+    started_clock = time.perf_counter()
+    ist = pytz.timezone("Asia/Kolkata")
+    actual_started = datetime.now(ist)
+    scheduled_value = quiz.get("scheduled_at")
+    scheduled_local = scheduled_value.astimezone(ist) if scheduled_value else None
+    scheduled_text = (
+        scheduled_local.strftime("%d %b %Y, %I:%M:%S %p IST")
+        if scheduled_local else "Unknown"
+    )
+    delay_seconds = (
+        (actual_started - scheduled_local).total_seconds()
+        if scheduled_local else 0.0
+    )
+    if delay_seconds >= 0:
+        delay_text = f"{delay_seconds:.2f} seconds late"
+    else:
+        delay_text = f"{abs(delay_seconds):.2f} seconds early"
+
+    groups = [
+        g for g in db.get_bot_groups(bot_id)
+        if int(g['group_id']) not in (AUTO_QUIZ_MANAGEMENT_GROUP_ID, int(config['chat_id']))
+    ]
     bot_info = db.get_bot_by_id(bot_id) or {}
     username = '@' + (bot_info.get('bot_username') or '').lstrip('@')
-    if len(quiz['options']) >= 12:
-        logger.warning("[auto_quiz] Quiz %s has 12 options; Telegram's 12-option limit prevents branding", quiz['id'])
-    already_sent = db.get_auto_quiz_sent_groups(quiz['id'])
-    success = 0
-    translation_cache = {}
-    for grp in groups:
-        if int(grp['group_id']) in already_sent:
-            continue
-        lang = db.get_group_language(bot_id, grp['group_id'])
-        if lang not in translation_cache:
-            translation_cache[lang] = await _translate_quiz(quiz, lang)
-        question, translated_options, explanation = translation_cache[lang]
-        # Keep branding as the final, untranslated option.
-        if len(quiz['options']) < 12:
-            translated_options = translated_options + [username[:100]]
-        try:
-            sent = await context.bot.send_poll(
-                chat_id=grp['group_id'], question=question, options=translated_options,
-                type='quiz', correct_option_id=quiz['correct_option'],
-                explanation=explanation, is_anonymous=False
-            )
-            db.add_auto_quiz_send(quiz['id'], bot_id, grp['group_id'], sent.message_id,
-                                  sent.poll.id if sent.poll else '')
-            success += 1
-        except Exception as exc:
-            logger.warning("[auto_quiz] Send failed bot=%s group=%s: %s", bot_id, grp['group_id'], exc)
-    # Complete only when every target group has a recorded delivery. Failed groups
-    # are retried at the next slot; already delivered groups are skipped.
-    if len(already_sent) + success >= len(groups):
-        db.mark_auto_quiz_sent(quiz['id'])
+
+    if not groups:
+        db.release_auto_quiz(quiz['id'])
         try:
             await context.bot.send_message(
                 chat_id=AUTO_QUIZ_MANAGEMENT_GROUP_ID,
-                text=f"📤 Auto quiz sent for @{username.lstrip('@')}\n"
-                     f"✅ Delivered to {success}/{len(groups)} group(s).\n"
-                     f"📚 Remaining queue: {db.count_pending_auto_quizzes(bot_id)}"
+                text=(
+                    f"⚠️ <b>AUTO QUIZ DELIVERY FAILED</b>\n"
+                    f"🤖 Bot: {username}\n"
+                    f"🗓️ Scheduled: {scheduled_text}\n"
+                    f"❌ No connected destination groups were found.\n"
+                    f"🔄 Rescheduled to the next available slot."
+                ),
+                parse_mode=ParseMode.HTML
             )
         except Exception:
-            pass
+            logger.exception("[auto_quiz] Could not send no-groups report for bot %s", bot_id)
+        return
+
+    already_sent = db.get_auto_quiz_sent_groups(quiz['id'])
+    success_now = 0
+    failed_groups = []
+    translation_cache = {}
+
+    for grp in groups:
+        group_id = int(grp['group_id'])
+        if group_id in already_sent:
+            continue
+        try:
+            lang = db.get_group_language(bot_id, group_id)
+            if lang not in translation_cache:
+                translation_cache[lang] = await _translate_quiz(quiz, lang)
+            question, translated_options, explanation = translation_cache[lang]
+
+            # Keep branding as the final, untranslated option.
+            if len(quiz['options']) < 12:
+                translated_options = translated_options + [username[:100]]
+
+            sent = await context.bot.send_poll(
+                chat_id=group_id,
+                question=question,
+                options=translated_options,
+                type='quiz',
+                correct_option_id=quiz['correct_option'],
+                explanation=explanation,
+                is_anonymous=False
+            )
+            db.add_auto_quiz_send(
+                quiz['id'], bot_id, group_id, sent.message_id,
+                sent.poll.id if sent.poll else ''
+            )
+            success_now += 1
+        except Exception as exc:
+            failed_groups.append(group_id)
+            logger.warning(
+                "[auto_quiz] Send failed bot=%s quiz=%s group=%s: %s",
+                bot_id, quiz['id'], group_id, exc
+            )
+
+    total_delivered = len(already_sent) + success_now
+    total_failed = len(groups) - total_delivered
+    elapsed = time.perf_counter() - started_clock
+    completed = total_failed == 0
+
+    if completed:
+        db.mark_auto_quiz_sent(quiz['id'])
+        status_text = "🟢 COMPLETED"
     else:
         db.release_auto_quiz(quiz['id'])
+        status_text = "🟡 PARTIALLY DELIVERED — RETRY SCHEDULED"
+
+    try:
+        await context.bot.send_message(
+            chat_id=AUTO_QUIZ_MANAGEMENT_GROUP_ID,
+            text=(
+                f"📤 <b>AUTO QUIZ DELIVERY REPORT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🤖 Bot: {username}\n"
+                f"📝 Quiz ID: <code>#{quiz['id']}</code>\n"
+                f"🗓️ Scheduled: <b>{scheduled_text}</b>\n"
+                f"🕒 Actual start: <b>{actual_started.strftime('%d %b %Y, %I:%M:%S %p IST')}</b>\n"
+                f"📏 Schedule difference: <b>{delay_text}</b>\n"
+                f"⏱️ Time taken: <b>{elapsed:.2f} seconds</b>\n\n"
+                f"📊 <b>DELIVERY</b>\n"
+                f"✅ Successful this run: <b>{success_now}</b>\n"
+                f"📨 Already delivered earlier: <b>{len(already_sent)}</b>\n"
+                f"❌ Failed / pending: <b>{total_failed}</b>\n"
+                f"📦 Total destination groups: <b>{len(groups)}</b>\n"
+                f"📚 Remaining FIFO queue: <b>{db.count_pending_auto_quizzes(bot_id)}</b>\n\n"
+                f"{status_text}"
+                + (f"\n🔄 Failed group IDs: <code>{', '.join(map(str, failed_groups[:20]))}</code>" if failed_groups else "")
+            ),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        logger.exception("[auto_quiz] Could not send delivery report for bot %s quiz %s", bot_id, quiz['id'])
 
 
 # ─── Quiz management: receive poll ───────────────────────────────────────────
@@ -1831,7 +1914,9 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
         ), group=1)
 
     # Schedule one FIFO auto-quiz delivery every 30 minutes, 09:00–21:30 IST.
-    ist_tz = pytz.timezone("Asia/Kolkata")
+    # ZoneInfo is required here: attaching a pytz timezone directly to time()
+    # can produce the historical +05:53 LMT offset instead of India +05:30.
+    ist_tz = ZoneInfo("Asia/Kolkata")
     for slot_index in range(26):
         total_minutes = 9 * 60 + slot_index * 30
         slot_time = dt_time(hour=total_minutes // 60, minute=total_minutes % 60, tzinfo=ist_tz)
