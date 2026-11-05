@@ -165,9 +165,11 @@ CREATE TABLE IF NOT EXISTS auto_quizzes (
     status TEXT NOT NULL DEFAULT 'awaiting_answer',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     sent_at TIMESTAMPTZ,
+    scheduled_at TIMESTAMPTZ,
     UNIQUE(bot_id, source_message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_auto_quiz_queue ON auto_quizzes(bot_id, status, answered_at, id);
+CREATE INDEX IF NOT EXISTS idx_auto_quiz_due ON auto_quizzes(bot_id, status, scheduled_at, answered_at, id);
 
 CREATE TABLE IF NOT EXISTS auto_quiz_sends (
     id BIGSERIAL PRIMARY KEY,
