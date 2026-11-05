@@ -2,7 +2,8 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional, List, Dict, Any
 from config import DATABASE_URL
 
@@ -65,7 +66,10 @@ def init_db():
             id BIGSERIAL PRIMARY KEY, auto_quiz_id BIGINT NOT NULL, bot_id BIGINT NOT NULL,
             group_id BIGINT NOT NULL, message_id BIGINT, poll_id TEXT UNIQUE,
             sent_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(auto_quiz_id, group_id))""")
+        cur.execute("ALTER TABLE auto_quizzes ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_auto_quiz_due ON auto_quizzes(bot_id, status, scheduled_at, answered_at, id)")
         cur.execute("UPDATE auto_quizzes SET status='pending' WHERE status='processing'")
+    backfill_auto_quiz_schedules()
 
 
 def is_subbot_admin(bot_id: int, user_id: int) -> bool:
@@ -140,15 +144,79 @@ def get_auto_quiz_by_source(bot_id: int, source_message_id: int):
         d = dict(row); d['options'] = json.loads(d['options']); return d
     return None
 
-def set_auto_quiz_answer(bot_id: int, source_message_id: int, correct_option: int) -> bool:
+
+def _next_ist_slot(after: datetime) -> datetime:
+    """Return the next strict 30-minute slot between 09:00 and 21:30 IST."""
+    tz = ZoneInfo("Asia/Kolkata")
+    local = after.astimezone(tz) if after.tzinfo else after.replace(tzinfo=tz)
+    base = local.replace(second=0, microsecond=0)
+    # Always use a strictly future slot.
+    mins = base.hour * 60 + base.minute
+    next_mins = ((mins // 30) + 1) * 30
+    day_add, next_mins = divmod(next_mins, 24 * 60)
+    candidate = (base.replace(hour=0, minute=0) + timedelta(days=day_add, minutes=next_mins))
+    if candidate.hour < 9:
+        candidate = candidate.replace(hour=9, minute=0)
+    elif candidate.hour > 21 or (candidate.hour == 21 and candidate.minute > 30):
+        candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=0)
+    return candidate
+
+
+
+def backfill_auto_quiz_schedules():
+    """Assign slots to answered queue rows created by older versions (scheduled_at NULL)."""
     with _DB() as cur:
+        cur.execute("SELECT DISTINCT bot_id FROM auto_quizzes WHERE status='pending' AND correct_option IS NOT NULL AND scheduled_at IS NULL")
+        bot_ids = [r["bot_id"] for r in cur.fetchall()]
+    for bot_id in bot_ids:
+        with _DB() as cur:
+            cur.execute("SELECT bot_id FROM auto_quiz_configs WHERE bot_id=%s AND enabled=TRUE FOR UPDATE", (bot_id,))
+            if not cur.fetchone():
+                continue
+            cur.execute(
+                """SELECT id FROM auto_quizzes
+                   WHERE bot_id=%s AND status='pending' AND correct_option IS NOT NULL AND scheduled_at IS NULL
+                   ORDER BY answered_at ASC, id ASC FOR UPDATE""",
+                (bot_id,)
+            )
+            quiz_ids = [r["id"] for r in cur.fetchall()]
+            cur.execute(
+                """SELECT MAX(scheduled_at) AS last_slot FROM auto_quizzes
+                   WHERE bot_id=%s AND status IN ('pending','processing') AND scheduled_at IS NOT NULL""",
+                (bot_id,)
+            )
+            last = cur.fetchone()["last_slot"]
+            cursor = max(datetime.now(ZoneInfo("Asia/Kolkata")), last) if last else datetime.now(ZoneInfo("Asia/Kolkata"))
+            for quiz_id in quiz_ids:
+                cursor = _next_ist_slot(cursor)
+                cur.execute("UPDATE auto_quizzes SET scheduled_at=%s WHERE id=%s", (cursor, quiz_id))
+
+
+def set_auto_quiz_answer(bot_id: int, source_message_id: int, correct_option: int) -> bool:
+    """Save answer and reserve a unique FIFO distribution slot in Asia/Kolkata."""
+    with _DB() as cur:
+        # Serialize slot assignment for this subbot.
+        cur.execute("SELECT bot_id FROM auto_quiz_configs WHERE bot_id=%s AND enabled=TRUE FOR UPDATE", (bot_id,))
+        if not cur.fetchone():
+            return False
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
         cur.execute(
-            """UPDATE auto_quizzes SET correct_option=%s, answered_at=NOW(), status='pending'
+            """SELECT MAX(scheduled_at) AS last_slot FROM auto_quizzes
+               WHERE bot_id=%s AND status IN ('pending','processing') AND scheduled_at IS NOT NULL""",
+            (bot_id,)
+        )
+        row = cur.fetchone()
+        last_slot = row["last_slot"] if row else None
+        scheduled_at = _next_ist_slot(max(now, last_slot) if last_slot else now)
+        cur.execute(
+            """UPDATE auto_quizzes
+               SET correct_option=%s, answered_at=NOW(), status='pending', scheduled_at=%s
                WHERE bot_id=%s AND source_message_id=%s AND correct_option IS NULL
                RETURNING id""",
-            (correct_option, bot_id, source_message_id)
+            (correct_option, scheduled_at, bot_id, source_message_id)
         )
         return cur.fetchone() is not None
+
 
 def get_next_auto_quiz(bot_id: int):
     """Atomically claim the oldest answered quiz so scheduled jobs cannot double-send it."""
@@ -156,8 +224,9 @@ def get_next_auto_quiz(bot_id: int):
         cur.execute(
             """UPDATE auto_quizzes SET status='processing'
                WHERE id=(SELECT id FROM auto_quizzes WHERE bot_id=%s AND status='pending'
-                         AND correct_option IS NOT NULL ORDER BY answered_at ASC, id ASC
-                         FOR UPDATE SKIP LOCKED LIMIT 1)
+                         AND correct_option IS NOT NULL AND scheduled_at <= NOW() + INTERVAL '5 seconds'
+                         ORDER BY scheduled_at ASC, answered_at ASC, id ASC
+                         LIMIT 1 FOR UPDATE SKIP LOCKED)
                RETURNING *""", (bot_id,)
         )
         row = cur.fetchone()
@@ -170,9 +239,28 @@ def get_auto_quiz_sent_groups(quiz_id: int):
         cur.execute("SELECT group_id FROM auto_quiz_sends WHERE auto_quiz_id=%s", (quiz_id,))
         return {int(r['group_id']) for r in cur.fetchall()}
 
+
 def release_auto_quiz(quiz_id: int):
+    """Retry an incompletely delivered quiz at the next free slot, preserving FIFO."""
     with _DB() as cur:
-        cur.execute("UPDATE auto_quizzes SET status='pending' WHERE id=%s AND status='processing'", (quiz_id,))
+        cur.execute("SELECT bot_id, scheduled_at FROM auto_quizzes WHERE id=%s AND status='processing' FOR UPDATE", (quiz_id,))
+        row = cur.fetchone()
+        if not row:
+            return
+        bot_id = row["bot_id"]
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        current = row["scheduled_at"]
+        retry_at = _next_ist_slot(max(now, current) if current else now)
+        cur.execute(
+            """UPDATE auto_quizzes SET scheduled_at=scheduled_at + INTERVAL '30 minutes'
+               WHERE bot_id=%s AND status='pending' AND scheduled_at >= %s""",
+            (bot_id, retry_at)
+        )
+        cur.execute(
+            "UPDATE auto_quizzes SET status='pending', scheduled_at=%s WHERE id=%s AND status='processing'",
+            (retry_at, quiz_id)
+        )
+
 
 def mark_auto_quiz_sent(quiz_id: int):
     with _DB() as cur:
