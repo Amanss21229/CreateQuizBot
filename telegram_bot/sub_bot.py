@@ -475,9 +475,9 @@ async def auto_receive_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if scheduled else "Schedule pending"
         )
         await msg.reply_text(
-            f"✅ Correct answer saved: <b>{quiz['options'][idx]}</b>\\n"
+            f"✅ Correct answer saved: <b>{quiz['options'][idx]}</b>\n"
             f"📋 Pending in @{(db.get_bot_by_id(bot_id) or {}).get('bot_username','subbot')}'s FIFO queue: "
-            f"<b>{db.count_pending_auto_quizzes(bot_id)}</b>\\n"
+            f"<b>{db.count_pending_auto_quizzes(bot_id)}</b>\n"
             f"🗓️ Scheduled distribution: <b>{scheduled_text}</b>",
             parse_mode=ParseMode.HTML
         )
@@ -513,14 +513,32 @@ async def auto_quiz_slot(context: ContextTypes.DEFAULT_TYPE):
     else:
         delay_text = f"{abs(delay_seconds):.2f} seconds early"
 
-    groups = [
-        g for g in db.get_bot_groups(bot_id)
-        if int(g['group_id']) not in (AUTO_QUIZ_MANAGEMENT_GROUP_ID, int(config['chat_id']))
-    ]
+    # Include every registered group/channel and every user who has started
+    # this subbot. Telegram may still reject destinations that blocked the bot,
+    # removed it, or never opened a private chat; those are reported explicitly.
+    destinations = {}
+    for grp in db.get_bot_groups(bot_id):
+        chat_id = int(grp['group_id'])
+        if chat_id in (AUTO_QUIZ_MANAGEMENT_GROUP_ID, int(config['chat_id'])):
+            continue
+        destinations[chat_id] = {
+            "chat_id": chat_id,
+            "label": grp.get("group_name") or str(chat_id),
+            "kind": grp.get("group_type") or "group/channel",
+        }
+    for user in db.get_bot_users(bot_id):
+        user_id = int(user["user_id"])
+        destinations.setdefault(user_id, {
+            "chat_id": user_id,
+            "label": user.get("first_name") or str(user_id),
+            "kind": "private",
+        })
+    targets = list(destinations.values())
+
     bot_info = db.get_bot_by_id(bot_id) or {}
     username = '@' + (bot_info.get('bot_username') or '').lstrip('@')
 
-    if not groups:
+    if not targets:
         db.release_auto_quiz(quiz['id'])
         try:
             await context.bot.send_message(
@@ -529,7 +547,7 @@ async def auto_quiz_slot(context: ContextTypes.DEFAULT_TYPE):
                     f"⚠️ <b>AUTO QUIZ DELIVERY FAILED</b>\n"
                     f"🤖 Bot: {username}\n"
                     f"🗓️ Scheduled: {scheduled_text}\n"
-                    f"❌ No connected destination groups were found.\n"
+                    f"❌ No registered destination groups, channels, or users were found.\n"
                     f"🔄 Rescheduled to the next available slot."
                 ),
                 parse_mode=ParseMode.HTML
@@ -543,43 +561,78 @@ async def auto_quiz_slot(context: ContextTypes.DEFAULT_TYPE):
     failed_groups = []
     translation_cache = {}
 
-    for grp in groups:
-        group_id = int(grp['group_id'])
-        if group_id in already_sent:
+    for target in targets:
+        chat_id = target["chat_id"]
+        if chat_id in already_sent:
             continue
+
+        lang = "en"
+        if target["kind"] not in ("private", "user"):
+            try:
+                lang = db.get_group_language(bot_id, chat_id)
+            except Exception:
+                lang = "en"
         try:
-            lang = db.get_group_language(bot_id, group_id)
             if lang not in translation_cache:
                 translation_cache[lang] = await _translate_quiz(quiz, lang)
             question, translated_options, explanation = translation_cache[lang]
-
-            # Keep branding as the final, untranslated option.
-            if len(quiz['options']) < 12:
-                translated_options = translated_options + [username[:100]]
-
-            sent = await context.bot.send_poll(
-                chat_id=group_id,
-                question=question,
-                options=translated_options,
-                type='quiz',
-                correct_option_id=quiz['correct_option'],
-                explanation=explanation,
-                is_anonymous=False
-            )
-            db.add_auto_quiz_send(
-                quiz['id'], bot_id, group_id, sent.message_id,
-                sent.poll.id if sent.poll else ''
-            )
-            success_now += 1
         except Exception as exc:
-            failed_groups.append(group_id)
+            failed_groups.append(chat_id)
             logger.warning(
-                "[auto_quiz] Send failed bot=%s quiz=%s group=%s: %s",
-                bot_id, quiz['id'], group_id, exc
+                "[auto_quiz] Translation failed bot=%s quiz=%s destination=%s: %s",
+                bot_id, quiz['id'], chat_id, exc
+            )
+            continue
+
+        # Keep branding as the final, untranslated option.
+        if len(quiz['options']) < 12:
+            translated_options = translated_options + [username[:100]]
+
+        last_error = None
+        for attempt_no in range(1, 4):
+            try:
+                sent = await context.bot.send_poll(
+                    chat_id=chat_id,
+                    question=question,
+                    options=translated_options,
+                    type='quiz',
+                    correct_option_id=quiz['correct_option'],
+                    explanation=explanation,
+                    is_anonymous=False
+                )
+                db.add_auto_quiz_send(
+                    quiz['id'], bot_id, chat_id, sent.message_id,
+                    sent.poll.id if sent.poll else ''
+                )
+                success_now += 1
+                last_error = None
+                break
+            except RetryAfter as exc:
+                last_error = exc
+                if attempt_no < 3:
+                    await asyncio.sleep(float(exc.retry_after) + 1)
+            except (TelegramError, TimeoutError, ConnectionError, OSError) as exc:
+                last_error = exc
+                if attempt_no < 3:
+                    await asyncio.sleep(attempt_no * 2)
+            except Exception as exc:
+                # One short retry can recover transient API/database edge cases;
+                # permanent Telegram permission errors are ultimately reported.
+                last_error = exc
+                if attempt_no < 3:
+                    await asyncio.sleep(attempt_no * 2)
+
+        if last_error is not None:
+            failed_groups.append(chat_id)
+            logger.warning(
+                "[auto_quiz] Send failed bot=%s quiz=%s destination=%s (%s): %s",
+                bot_id, quiz['id'], chat_id, target["kind"], last_error
             )
 
-    total_delivered = len(already_sent) + success_now
-    total_failed = len(groups) - total_delivered
+    target_ids = {target["chat_id"] for target in targets}
+    already_delivered_here = len(already_sent & target_ids)
+    total_delivered = already_delivered_here + success_now
+    total_failed = max(0, len(targets) - total_delivered)
     elapsed = time.perf_counter() - started_clock
     completed = total_failed == 0
 
@@ -604,9 +657,9 @@ async def auto_quiz_slot(context: ContextTypes.DEFAULT_TYPE):
                 f"⏱️ Time taken: <b>{elapsed:.2f} seconds</b>\n\n"
                 f"📊 <b>DELIVERY</b>\n"
                 f"✅ Successful this run: <b>{success_now}</b>\n"
-                f"📨 Already delivered earlier: <b>{len(already_sent)}</b>\n"
+                f"📨 Already delivered earlier: <b>{already_delivered_here}</b>\n"
                 f"❌ Failed / pending: <b>{total_failed}</b>\n"
-                f"📦 Total destination groups: <b>{len(groups)}</b>\n"
+                f"📦 Total destinations (groups/channels/private): <b>{len(targets)}</b>\n"
                 f"📚 Remaining FIFO queue: <b>{db.count_pending_auto_quizzes(bot_id)}</b>\n\n"
                 f"{status_text}"
                 + (f"\n🔄 Failed group IDs: <code>{', '.join(map(str, failed_groups[:20]))}</code>" if failed_groups else "")
@@ -1107,7 +1160,8 @@ async def cmd_adminhelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         "📊 <b>Statistics (Owner)</b>\n"
         "┌ /stats — Total users, groups, quizzes sent\n"
-        "└ /leaderboard — Group leaderboard (works everywhere)\n\n"
+        "├ /leaderboard — Group leaderboard (works everywhere)\n"
+        "└ /sendleaderboard — Instantly distribute today’s group + universal leaderboard\n\n"
 
         "📣 <b>Broadcast (Owner)</b>\n"
         "┌ /broadcast <code>[text]</code> — Send a message to all bot users\n"
@@ -1714,54 +1768,76 @@ async def cmd_inactive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── Daily leaderboard scheduler ─────────────────────────────────────────────
 
-async def send_daily_leaderboards(ctx: ContextTypes.DEFAULT_TYPE):
-    bot_id = ctx.job.data['bot_id']
+async def dispatch_daily_leaderboards(bot, bot_id: int):
+    """Send group + universal boards to chats, and universal board to private users."""
     bot_info = db.get_bot_by_id(bot_id)
     if not bot_info or bot_info['status'] != 'active':
-        return
+        return {"sent": 0, "failed": 0, "skipped": 0}
 
     groups = db.get_bot_groups(bot_id)
-    ist = pytz.timezone(TIMEZONE)
+    users = db.get_bot_users(bot_id)
+    ist = ZoneInfo("Asia/Kolkata")
     date_str = datetime.now(ist).strftime("%d %B %Y")
     medals = ["🥇", "🥈", "🥉"]
-
-    # Pre-fetch global leaderboard data (same for all groups)
     global_lb = db.get_global_leaderboard(bot_id, limit=GLOBAL_LEADERBOARD_LIMIT)
-    settings = db.get_bot_settings(bot_id)
-    mgmt_gid = (settings or {}).get('quiz_management_group_id')
+    settings = db.get_bot_settings(bot_id) or {}
+    mgmt_gid = settings.get('quiz_management_group_id')
 
-    # Cache per-language global texts to avoid rebuilding for groups with same lang
-    global_text_cache: dict = {}
+    global_text_cache = {}
+    sent_count = failed_count = skipped_count = 0
 
-    for grp in groups:
-        group_id = grp['group_id']
-        group_name = grp['group_name']
-        group_username = grp.get('group_username', '')
-        if group_id == mgmt_gid:
-            continue
+    async def safe_send(chat_id: int, text: str):
+        nonlocal sent_count, failed_count
+        for attempt_no in range(1, 4):
+            try:
+                await bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+                sent_count += 1
+                return True
+            except RetryAfter as exc:
+                if attempt_no < 3:
+                    await asyncio.sleep(float(exc.retry_after) + 1)
+                else:
+                    failed_count += 1
+            except Exception as exc:
+                if attempt_no < 3 and isinstance(exc, (TelegramError, TimeoutError, ConnectionError, OSError)):
+                    await asyncio.sleep(attempt_no * 2)
+                else:
+                    failed_count += 1
+                    logger.warning("[daily_leaderboard] Failed destination=%s: %s", chat_id, exc)
+                    return False
+        return False
 
-        # Each group may have its own language
-        lang = db.get_group_language(bot_id, group_id)
-
-        # Build global LB text for this language (cached)
+    def build_global(lang: str):
         if lang not in global_text_cache:
-            g_text = t('lb_daily_global_header', lang, limit=GLOBAL_LEADERBOARD_LIMIT, date=date_str)
-            g_text += "━" * 30 + "\n\n"
+            text = t('lb_daily_global_header', lang, limit=GLOBAL_LEADERBOARD_LIMIT, date=date_str)
+            text += "━" * 30 + "\n\n"
             if global_lb:
                 for i, entry in enumerate(global_lb):
                     rank_icon = medals[i] if i < 3 else f"#{i+1}"
                     name = entry.get('first_name') or "User"
-                    g_text += t('lb_global_row', lang,
-                                rank=rank_icon, name=user_link(entry['user_id'], name),
-                                marks=entry['total_marks'])
+                    text += t('lb_global_row', lang,
+                              rank=rank_icon, name=user_link(entry['user_id'], name),
+                              marks=entry['total_marks'])
             else:
-                g_text += t('lb_no_attempts_daily', lang)
-            global_text_cache[lang] = g_text
-        global_text = global_text_cache[lang]
+                text += t('lb_no_attempts_daily', lang)
+            global_text_cache[lang] = text
+        return global_text_cache[lang]
 
-        # Group leaderboard
-        lb = db.get_group_leaderboard(bot_id, group_id)
+    # Groups and channels receive their own group leaderboard (if available)
+    # followed by the universal leaderboard.
+    for grp in groups:
+        chat_id = int(grp['group_id'])
+        if mgmt_gid and chat_id == int(mgmt_gid):
+            skipped_count += 1
+            continue
+        lang = db.get_group_language(bot_id, chat_id)
+        lb = db.get_group_leaderboard(bot_id, chat_id)
         if lb:
+            group_name = grp.get('group_name') or "Group"
+            group_username = grp.get('group_username') or ''
             chat_link = (f"<a href='https://t.me/{group_username}'>{group_name}</a>"
                          if group_username else group_name)
             text = t('lb_daily_group_header', lang, chat_link=chat_link, date=date_str)
@@ -1773,20 +1849,38 @@ async def send_daily_leaderboards(ctx: ContextTypes.DEFAULT_TYPE):
                           rank=rank_icon, name=user_link(entry['user_id'], name),
                           correct=entry['correct'], wrong=entry['wrong'],
                           marks=entry['total_marks'])
-            try:
-                await ctx.application.bot.send_message(
-                    group_id, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
-                )
-            except Exception as e:
-                logger.warning(f"Failed to send group LB to {group_id}: {e}")
+            await safe_send(chat_id, text)
+        await safe_send(chat_id, build_global(lang))
 
-        # Global leaderboard
-        try:
-            await ctx.application.bot.send_message(
-                group_id, global_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send global LB to {group_id}: {e}")
+    # Every registered user receives the universal leaderboard in their private chat.
+    for user in users:
+        user_id = int(user['user_id'])
+        await safe_send(user_id, build_global("en"))
+
+    return {"sent": sent_count, "failed": failed_count, "skipped": skipped_count}
+
+
+async def send_daily_leaderboards(ctx: ContextTypes.DEFAULT_TYPE):
+    bot_id = ctx.job.data['bot_id']
+    await dispatch_daily_leaderboards(ctx.application.bot, bot_id)
+
+
+async def cmd_sendleaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    bot_id = get_bot_id_from_app(ctx.application)
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not (is_main_admin(user_id) or is_subowner(bot_id, user_id) or is_subadmin(bot_id, user_id)):
+        await update.message.reply_text("⛔ This command is only for the main owner, this subbot's owner, or its admins.")
+        return
+
+    status = await update.message.reply_text("🏆 Preparing and distributing today's group + universal leaderboards…")
+    result = await dispatch_daily_leaderboards(ctx.application.bot, bot_id)
+    await status.edit_text(
+        "✅ <b>Leaderboard distribution completed.</b>\n\n"
+        f"📨 Messages sent: <b>{result['sent']}</b>\n"
+        f"❌ Failed destinations: <b>{result['failed']}</b>\n"
+        f"⏭️ Skipped (management group): <b>{result['skipped']}</b>",
+        parse_mode=ParseMode.HTML
+    )
 
 
 # ─── Handle all inactive-bot commands ────────────────────────────────────────
@@ -1867,6 +1961,7 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
     app.add_handler(CommandHandler("send", cmd_send))
     app.add_handler(CommandHandler("setauto", cmd_setauto))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
+    app.add_handler(CommandHandler("sendleaderboard", cmd_sendleaderboard))
     app.add_handler(CommandHandler("myRank", cmd_myrank))
     # Subbot owner-only access management
     app.add_handler(CommandHandler("promote", cmd_promote))
@@ -1925,8 +2020,10 @@ def build_subbot_app(token: str, bot_id: int) -> Application:
             name=f"auto_quiz_{bot_id}_{slot_index}"
         )
 
-    # Schedule daily leaderboard at 10 PM IST
-    ist_tz = pytz.timezone(TIMEZONE)
+    # Schedule daily leaderboard at the configured IST time.
+    # Use ZoneInfo consistently; pytz attached directly to datetime.time can
+    # produce the historical LMT offset on some versions.
+    ist_tz = ZoneInfo(TIMEZONE)
     app.job_queue.run_daily(
         send_daily_leaderboards,
         time=dt_time(hour=LEADERBOARD_HOUR, minute=LEADERBOARD_MINUTE, tzinfo=ist_tz),
