@@ -193,21 +193,56 @@ def backfill_auto_quiz_schedules():
 
 
 def set_auto_quiz_answer(bot_id: int, source_message_id: int, correct_option: int) -> bool:
-    """Save answer and reserve a unique FIFO distribution slot in Asia/Kolkata."""
+    """Save the answer and reserve the next available future IST slot in FIFO order."""
+    ist = ZoneInfo("Asia/Kolkata")
     with _DB() as cur:
-        # Serialize slot assignment for this subbot.
-        cur.execute("SELECT bot_id FROM auto_quiz_configs WHERE bot_id=%s AND enabled=TRUE FOR UPDATE", (bot_id,))
-        if not cur.fetchone():
-            return False
-        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        # Serialize all queue changes for this subbot.
         cur.execute(
-            """SELECT MAX(scheduled_at) AS last_slot FROM auto_quizzes
-               WHERE bot_id=%s AND status IN ('pending','processing') AND scheduled_at IS NOT NULL""",
+            "SELECT bot_id FROM auto_quiz_configs WHERE bot_id=%s AND enabled=TRUE FOR UPDATE",
             (bot_id,)
         )
-        row = cur.fetchone()
-        last_slot = row["last_slot"] if row else None
-        scheduled_at = _next_ist_slot(max(now, last_slot) if last_slot else now)
+        if not cur.fetchone():
+            return False
+
+        now = datetime.now(ist)
+
+        # A missed/overdue pending slot must not push a new quiz into yesterday's
+        # queue tail. Re-pack overdue pending quizzes from the next future slot,
+        # preserving their original FIFO order. Already-sent quizzes are excluded.
+        cur.execute(
+            """SELECT id, scheduled_at FROM auto_quizzes
+               WHERE bot_id=%s AND status='pending' AND correct_option IS NOT NULL
+                 AND scheduled_at IS NOT NULL
+               ORDER BY scheduled_at ASC, answered_at ASC, id ASC
+               FOR UPDATE""",
+            (bot_id,)
+        )
+        pending_rows = cur.fetchall()
+        next_slot = _next_ist_slot(now)
+        has_overdue = any(
+            row["scheduled_at"] is not None and row["scheduled_at"] <= now
+            for row in pending_rows
+        )
+        if has_overdue:
+            # Re-pack the complete pending queue so no two quizzes reserve
+            # the same slot and FIFO order remains deterministic.
+            for pending in pending_rows:
+                cur.execute(
+                    "UPDATE auto_quizzes SET scheduled_at=%s WHERE id=%s",
+                    (next_slot, pending["id"])
+                )
+                next_slot = _next_ist_slot(next_slot)
+
+        cur.execute(
+            """SELECT MAX(scheduled_at) AS last_slot FROM auto_quizzes
+               WHERE bot_id=%s AND status IN ('pending','processing')
+                 AND scheduled_at > NOW()""",
+            (bot_id,)
+        )
+        last_slot = cur.fetchone()["last_slot"]
+        base = max(now, last_slot.astimezone(ist) if last_slot else now)
+        scheduled_at = _next_ist_slot(base)
+
         cur.execute(
             """UPDATE auto_quizzes
                SET correct_option=%s, answered_at=NOW(), status='pending', scheduled_at=%s
